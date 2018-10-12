@@ -7,7 +7,7 @@ Hello! In this repository you will find the complementary material to my work _"
 * [Paper](https://github.com/aishameriane/Presentations/blob/master/ESOBE/Schmidt_Moura23072018.pdf) - The version submitted to the event.
 * [Poster](https://github.com/aishameriane/Presentations/blob/master/ESOBE/P%C3%B4ster%20ESOBE.pdf) - PDF file of the poster.
 * [New version] - I'm working on a newer version, but still needs some adjustmets in the text and results. If you keep scrolling on this readme, you will find some explanations on what I am trying to do now.
-* [Codes] - In the paper I used a combination of Matlab and R code. It still has some parts of the comments in Portuguese, so as soon as I finish fixing this, will put in here. My intention is to migrate everything to R, but for now the estimation is being computed on Matlab, while de data download, cleaning and post processing is made on R. If you want the code, please send me an email.
+* [Codes](https://github.com/aishameriane/Presentations/tree/master/ESOBE/Code) - In the paper I used a combination of Matlab and R code. It still has some parts of the comments in Portuguese, so as soon as I finish fixing this, will put in here. My intention is to migrate everything to R, but for now the estimation is being computed on Matlab, while de data download, cleaning and post processing is made on R.
 
 ## What was done so far
 
