@@ -1,0 +1,2842 @@
+---
+title: "TVP-VAR Wishart"
+author: "A. Schmidt"
+date: "Last update: October 05, 2018."
+header-includes:
+   - \usepackage{bigints}
+   - \usepackage[brazil]{babel}
+   - \usepackage{graphicx}
+   - \usepackage{amsmath}
+   - \usepackage{amsfonts}
+   -  \usepackage{calrsfs}
+   - \usepackage{mathrsfs}
+   - \usepackage{upgreek}
+output: html_document
+bibliography: references.bib
+---
+
+<script type="text/x-mathjax-config">
+MathJax.Hub.Config({
+  TeX: { 
+      equationNumbers: {
+ 
+            autoNumber: "all",
+            formatNumber: function (n) {return '9.'+n}
+      } 
+  }
+});
+</script>
+
+\begin{align*}
+\newcommand{\norm}[1]{\left\lVert#1\right\rVert}\\
+\def\I{{\mathbb I}}\\
+\def\P{{\mathbb P}}\\
+\def\E{{\mathbb E}}\\
+\def\V{{\mathbb V}}\\
+\def\R{{\mathbb R}}\\
+\def\N{{\mathbb N}}\\
+\def\Q{{\mathbb Q}}\\
+\newcommand{\Or}{{\mathrm O}}\\
+\newcommand{\A}{{\mathcal A}}\\
+\newcommand{\C}{{\mathbb C}}\\
+\newcommand{\K}{{\mathbb K}}\\
+\newcommand{\Z}{{\mathbb Z}}\\
+\newcommand{\ubar}[1]{\text{\b{$#1$}}}
+\end{align*}
+
+
+# Loading packages
+
+If mirror 10 ("UFRJ") is offline, try changing `ind = 10` to `ind = 1`. Do the same thing if you get an error installing the `BETS` package.
+
+```{r, warning = FALSE, message = FALSE}
+chooseCRANmirror(graphics = FALSE, ind = 10)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(devtools, ggplot2, forecast, BETS, seasonal, seasonalview, bvarsv, lubridate, zoo, stargazer, gridExtra, reshape2, ggfortify, RColorBrewer, scales, quantmod, PerformanceAnalytics, strucchange, coda, knitr, grid, ggpubr, gdata, vars, urca, compiler, DescTools, kableExtra, knitr, readxl, Matrix, parallel, doParallel, foreach, iterators, doMC, ramcmc, logOfGamma, rWishart, MASS, pracma, matrixcalc, zoo) 
+```
+
+Auxiliary function
+
+```{r}  
+RunningStat <- function(iter., x, m_oldM = NA, m_oldS = NA){
+  
+  #iter. <- irep-nburn
+  #x <- deltaB^2
+  
+  if (iter. == 1){
+    m_newM <- x
+    m_newS <- 0.0
+  } else {
+    m_newM <- m_oldM + (x - m_oldM)/iter.
+    m_newS <- m_oldS + (x - m_oldM) * (x - m_newM) # check
+  }
+  
+  V   <- m_newS / (iter. - 1)
+  StD <- sqrt(V)
+  
+  return(list(m_newM, m_newS))
+  
+}
+
+```
+
+
+I'm using `wishrnd.m` from Matlab because R throws an error when I try to generate from a distribution with 1 degree of freedom. To access the function, I had to type `type wishrnd` on Matlab console.
+
+Although I'm interested only in the part that uses 2 arguments (without the Cholesky factor described below), I'll implement everything since it can come in handy for Future Aisha.
+
+From the help:
+
+_WISHRND Generate Wishart random matrix_ `W=WISHRND(SIGMA,DF)` _generates a random matrix W having the Wishart distribution with covariance matrix SIGMA and with DF degrees of freedom._
+
+`W=WISHRND(SIGMA,DF,D)` _expects_ `D` _to be the Cholesky factor of_ `SIGMA`.  _If you call WISHRND multiple times using the same value of_ `SIGMA`, _it's more efficient to supply_ D _instead of computing it each time._
+
+`[W,D]=WISHRND(SIGMA,DF)` _returns D so it can be used again in future calls to_ `WISHRND`.
+
+_References:_
+   * Krzanowski, W.J. (1990), _Principles of Multivariate Analysis_, Oxford.
+   * Smith, W.B., and R.R. Hocking (1972), _"Wishart variate generator,"_ Applied Statistics, v. 21, p. 341.  (Algorithm AS 53)
+**Copyright 1993-2011 The MathWorks, Inc.** 
+
+```{r}
+# Itriu function from matlab
+itriu <- function(p){
+  d. <- matrix(1, nrow = (p*(p-1)/2), ncol = 1)
+  d.[cumsum(0:(p-2))+1,] <- (p+1):3
+  d. <- cumsum(d.)
+  return(d.)
+}
+```
+
+```{r} 
+wishrnd <- function(sigma., df, d = NA){ # I got this from matlab
+  
+  ### DEBUG
+  #sigma. <- round(matrix(c(0.6340279, 0.5093474, 0.1080823, 0.5093474, 3.5968734, 0.9717169, 0.1080823, 0.9717169, 0.5115024), ncol = 3, byrow = F),5)
+  #sigma. <- as.matrix(Q)
+  #df <- 1
+  #d <- NA
+  #wishrnd(as.matrix(Q), T.+W_prdf)
+  #df <- T.+W_prdf
+  #d <- NA
+  ########
+  
+  #sigma.  <- nearest_spd(as.matrix(sigma.)) 
+  n. <- nrow(sigma.)
+  m. <- ncol(sigma.)
+  
+  if (n. != m.){
+    print("Sigma must be a square matrix!")
+  }
+  
+  # Factor sigma unless that has already been done
+  if (is.na(d)){
+    d <- chol(sigma.) # I'm not doing any control for d being non positive definite
+  } else if (is.na(sigma.)){
+    if ((ncol(d) != n. ) | (nrow(d) > n.)){
+      print("Deu ruim!")
+    }
+  } else {
+    n. <- ncol(d)
+  }
+  
+  if ((class(df) != "numeric") | (df <= 0)){
+    print("DF must be an integer greater than zero")
+  } else if ((df <= (n.-1)) & (df != round(df)) == TRUE) {
+    print("Check the value of df")
+  }
+
+  x <- matrix(NA, ncol = ncol(d), nrow = nrow(d))
+  # For small degrees of freedom, generate the matrix using the definition
+# of the Wishart distribution; see Krzanowski for example
+# I'm not implementing the algorithm for higher df
+  if ((df <= 81+n.) & (df==round(df))){
+   #x = randn(df,size(d,1)) * d; - this is the multivariate normal dist. with sigma = d, df rows and number of columns equal to the number of rows in d
+    x <- mvrnorm(n = 1, m= rep(0, ncol(d)), Sigma = d)
+
+  } else {
+    # Load diagonal elements with square root of chi-square variates 
+    a <- diag(sqrt(rchisq(length(df-(0:(n.-1))), df-(0:(n.-1)))))
+    
+    # Load upper triangle with independent normal (0,1) variates
+    a[itriu(n.)] <- rnorm(n.*(n.-1)/2, 0, 1) 
+    
+    # desired matrix is D'(A'A)D
+    x <- a[, 1:nrow(d)]%*%d
+  }
+  a <- x %*% t(x)
+  return(a)
+}
+```
+
+## Introduction
+
+* Obs: This code is not fully functional in the estimation part, but it downloads and treats the data (which I'm exporting to Matlab). It is still not fully organized because it is in progress.
+
+Consider the following model, based on Uhlig's model (I'm using Uhlig's notation because I'll deal with macro data, so the whole frequency thing will not be an issue):
+
+\begin{equation}
+    \begin{cases}
+        y_t &= A_t \cdot y_{t-1} + u_t \qquad u_t \iid \mathcal{N}(0, \Sigma^{1}_t) \tag{001}\\
+A_t &= A_{t-1} + \eta_t \qquad \eta_t \iid \mathcal{N}(0, \Omega^{-1}) \tag{002}\\
+\Sigma_t^{-1} &= \lambda^{-1}\Sigma_{t-1}^{-1/2}\Theta_t\Sigma_{t-1}^{-1/2'} \qquad \Theta \iid \mathcal{B}_M(n/2, 1/2) \tag{003}
+    \end{cases}
+\end{equation}
+
+This structure implies that (<span style="color:Red"> **Aisha**: Try to calculate it, future Aisha.</span>) 
+$$\E[\Sigma^{-1}_t| \Sigma_{t-1}^{-1}] = \Sigma_{t-1}^{-1} \qquad \text{se}\ \lambda = \frac{n}{n+1}$$
+
+So, the gibbs sampler scheme will be given by:
+
+1. Assuming that $\ubar{\Sigma}_T \equiv \left\{\Sigma_t \right\}_{t=1}^T$ and $\Omega$ are known, the system became linear and gaussian. In this case, we can use Kalman's forward filter and backward smoother. From this point,  $(A_1, A_2, \ldots, A_T| y, \ubar{\Sigma}_T, \Omega)$ can be sampled using [@carter_kohn1994] method;
+2. Assuming that $\ubar{A}_T = \{A_t \}_{t=1}^{T}$, then $y_t - A_t \cdot y_{t-1} = u_t$ is known (because $y_t$ it is the observable variable), i.e., $u_t$ is known and it follows a Normal distribution with heteroscedasticity. [@windle_carvalho2014] show how to construct the filter and smoother for this case;
+3. When $\ubar{A}_T$ are known, we also know $A_t - A_{t-1} = \eta_t$. In this case,  $p(\Omega|y, \ubar{A}_T)$, using a wishart prior $\mathcal{W}(Q_0, \nu_{q0})$, will be given by $\mathcal{W}((Q_0^{-1}+\ubar{\eta}'\ubar{\eta})^{-1}, T+\nu_{q0})$.
+
+The followiing code implement the Gibbs Algorithm above and has a previous part of downloading and treating data.
+
+# Data handling
+
+## Downloading data
+
+All data was obtained from Brazil's Central Bank repository (Sistema Gerenciador de Séries do Banco Central - SGS). The following series were used (obs: beginning and end of the series corresponds to the available data, not actual data used in the work and some data were manipulated, for example interest rate were converted to annual - mannipulations are described in code and in the paper appendix):
+
+* **Receitas tributárias - Regime de competência - Imposto de renda - Retido na fonte - Rendimento do trabalho** (_Labor Income_)
+    * **Beginning of the series:** January, 1992. 
+    * **End of the series:** February, 2018. 
+    * **Unity:** u.m.c. milhões. 
+    * **Series number in SGS:** 7620. 
+    * **Source:** Brazil's Central Bank - Statistics Department (BCB-DSTAT).
+    
+* **Receitas tributárias - Regime de competência - Imposto de renda - Retido na fonte - Rendimento do capital** (_Capital Income_)
+    * **Beginning of the series:** January, 1992. 
+    * **End of the series:** February, 2018. 
+    * **Unity:** u.m.c. milhões. 
+    * **Series number in SGS:** 7621. 
+    * **Source:** Brazil's Central Bank - Statistics Department (BCB-DSTAT).
+
+* **Taxa de Juros - Selic** (_Interest Rate_)
+    * **Beginning of the series:** July, 1986. 
+    * **End of the series:** April, 2018. 
+    * **Unity:** % monthly. 
+    * **Series number in SGS:** 4390. 
+    * **Source:** Brazil's Central Bank - Open Market Operations Department (BCB-Demab).
+    
+* **Taxa referencial de swaps DI pré-fixada (BM\&F) - Prazo de 90 dias (fim de período)** (_3-month treasury bill rate_)
+    * **Beginning of the series:** September, 1999. 
+    * **End of the series:** March, 2018. 
+    * **Unity:** % annual. 
+    * **Series number in SGS:** 7818. 
+    * **Source:** BM\&FBOVESPA S.A. - Bolsa de Valores, Mercadorias e Futuros (BM\&FBOVESPA).
+
+* **Índice nacional de preços ao consumidor-amplo (IPCA)** (_Price index_)
+    * **Beginning of the series:** January, 1980. 
+    * **End of the series:** March, 2018. 
+    * **Unity:** Percent monthly variation. 
+    * **Series number in SGS:** 433 
+    * **Source:** Brazilian Institute of Geography and Statistics (IBGE).
+
+* **Monthly GDP** 
+    * **Beginning of the series:** January, 1990. 
+    * **End of the series:** February, 2018. 
+    * **Unity:** Brazilian Real (R$) - millions. 
+    * **Series number in SGS:** 4380 
+    * **Source:** Brazil's Central Bank - Economic Department (BCB-Depec).
+    
+* **Interest Rate - USD Dollar (sell) - End of Period - Monthly** - ANTIGO
+    * **Beginning of the series:** January, 1953. 
+    * **End of the series:** March, 2018. 
+    * **Unity:** u.m.c./US$. 
+    * **Series number in SGS:** 3696. 
+    * **Source:** Brazil's Central Bank - Sisbacen PTAX800.
+
+* **Real Effective Interest Rate Index - Monthly** 
+    * **Beginning of the series:** January, 1988. 
+    * **End of the series:** March, 2018. 
+    * **Unity:** Index (100 = Jun/1994). 
+    * **Series number in SGS:** 11752 
+    * **Source:** Brazil's Central Bank - Statistics Department (BCB-DSTAT).
+
+
+Obs: Para ver o ADF, usei isso aqui: https://stats.stackexchange.com/questions/24072/interpreting-rs-ur-df-dickey-fuller-unit-root-test-results
+
+## Downloading the data
+
+Obs: I just created a file with the data, to avoid downloading it every single time I need to compile the code.
+
+```{r, message = FALSE, warning = FALSE, eval = FALSE} 
+# Auxiliary variables, so I don't need to bother when something changes 
+inicio <- "1996-01-01"
+fim    <- "2018-02-28"
+inicio_deflator <- "1993-12-31"
+inicio_swap     <- "1999-09-01"
+
+# Don't mess with this code
+inicio_cambio <- paste(seq(as.Date(inicio), length = 2, by = "-1 month")[2]) # 1 month before the beginning of the other series
+inicio_ipca2   <- paste(seq(as.Date(inicio), length = 12, by = "-1 month")[12]) # 12 months before the beginning of the other series
+inicio_pib2   <- paste(seq(as.Date(inicio), length = 12, by = "-1 year")[2]) # dunno
+fim_ipca      <- paste(seq(as.Date(fim), length = 2, by = "1 month")[2]) # 1 month after the end of the other series
+inicio_swap2 <- paste(seq(as.Date(inicio_swap), length = 2, by = "-1 month")[2]) # 1 1 month before the beginning of the other series
+
+## Obs: In case you have a SQL problem, rollback this two packages and mannually download BETS from CRAN and reinstall it as well
+## See: https://stackoverflow.com/questions/43073782/rmysql-system-error-10060 and https://github.com/pedrocostaferreira/BETS/issues/29
+# require(devtools)
+# install_version("DBI", version = "0.5", repos = "http://cran.us.r-project.org")
+# install_version("RMySQL", version = "0.10.9", repos = "http://cran.us.r-project.org")
+
+################################
+##### Capital labor ratio ######
+################################
+
+trabalho <- BETS.get("7620", from = inicio, to = fim)
+capital  <- BETS.get("7621", from = inicio, to = fim)
+capital_trabalho <- capital/trabalho
+
+########################
+##### Price Index ######
+########################
+
+ipca_raw <- BETS.get("433", from = inicio_deflator, to = fim_ipca) 
+ipca2 <- ipca_raw
+ipca2[1] <- 100
+
+# The following calculation was made following IPEA methodology: http://www.ipeadata.gov.br/iframe_transformacao.aspx?width=1474&height=701
+# Transforms in index
+for (i in 2:length(ipca2)){
+  ipca2[i] <- round(ipca2[(i-1)]*(1+ipca2[(i)]/100),2)
+}
+
+# Geometric Average
+for (i in 1:(length(ipca2)-1)){
+  ipca2[i] <- sqrt(ipca2[i]*ipca2[(i+1)])
+}
+
+# Change base to mar/2018
+for (i in 1:length(ipca2)) {
+  ipca2[i] <- tail(ipca2, n=2)[1]/ipca2[i]
+}
+
+# Elimitates data outside the period we are studying
+ipca2 <- ts(ipca2,  start = c(1993, 12, 31), frequency = 12)
+ipca_raw <- ts(ipca_raw,  start = c(1993, 12, 31), frequency = 12)
+ano_ipca <- as.numeric(substr(inicio_cambio, start = 1, stop = 4))
+mes_ipca <- as.numeric(substr(inicio_cambio, start = 6, stop = 7))
+ano_ipca2 <- as.numeric(substr(inicio_pib2, start = 1, stop = 4))
+mes_ipca2 <- as.numeric(substr(inicio_pib2, start = 6, stop = 7))
+ipca3 <- window(ipca2, c(ano_ipca2, mes_ipca2))
+ipca3 <- head(ipca3, n=length(ipca3)-1)
+ipca2 <- window(ipca2, c(ano_ipca, mes_ipca))
+ano_ipca <- as.numeric(substr(inicio_ipca2, start = 1, stop = 4))
+mes_ipca <- as.numeric(substr(inicio_ipca2, start = 6, stop = 7))
+ipca_raw <- window(ipca_raw, c(ano_ipca, mes_ipca))
+
+# Removes last observation
+ipca_raw <- ipca_raw[1:(length(ipca_raw)-1)]
+
+ipca_acum <- ipca_raw/100 + 1
+ipca <- vector()
+
+final <- length(ipca_acum)
+for (i in 12:final){
+  ipca[(i-11)] <- (prod(ipca_acum[(i-11):i])-1)*100
+}
+
+ano <- as.numeric(substr(inicio, start = 1, stop = 4))
+mes <- as.numeric(substr(inicio, start = 6, stop = 7))
+dia <- as.numeric(substr(inicio, start = 9, stop = 10))
+
+ipca <- ts(ipca,  start = c(ano, mes, dia), frequency = 12) # Date format YYYY MM DD
+
+#############################
+###### POPULATION ###########
+#############################
+
+pop2 <- data.frame(read_xlsx("D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\População Mensal Brasil.xlsx"))
+pop <- pop2[13:nrow(pop2),]
+
+################
+##### GDP ######
+################
+PIBmensal <- BETS.get("4380", from = inicio_cambio, to = fim)
+PIBmensal <- PIBmensal * ipca2 
+
+# Now the GDP to compute the annual variation
+PIBmensal2 <- BETS.get("4380", from = inicio_pib2, to = fim)
+PIBmensal2 <- PIBmensal2 * ipca3
+## Creating a new series with lagged variables
+# @#$&%@*#@%$@ piece of code is not working just dividing the variable, I'm going to use a for loop
+# Had to create a new variable because I couldn't make it work.
+PIBmensal_aux <- PIBmensal[-1]
+
+PIBmensal_an <- vector()
+for (i in 1:(length(PIBmensal)-1)) {
+  PIBmensal_an[i] <- PIBmensal_aux[i]/head(PIBmensal2, n=(length(PIBmensal2)-12))[i]
+}
+
+PIBmensal_an <- ts(PIBmensal_an,  start = c(1996, 01, 01), frequency = 12)
+PIBmensal_an <- (PIBmensal_an-1)*100
+
+# Now I'm going to calculate GDP per capita
+# Since GDP is in millions, I'll multiply by 10^6 first
+PIB_pc <- PIBmensal[-1]*10^6/pop[,2]
+PIB_pc <- ts(PIB_pc,  start = c(1996, 01, 01), frequency = 12)
+
+# I'm going to make a bigger series just to take log diff after
+PIB_pca <- PIBmensal*10^6/pop2[12:nrow(pop2),2]
+PIB_pca <- ts(PIB_pca,  start = c(1995, 12, 01), frequency = 12)
+
+# I can calculate the annual variation as well
+# In order to do so, I need the per capita GDP starting in 1995-01
+PIB_pc2 <- PIBmensal2*10^6/pop2[,2]
+
+PIBpc_an <- vector()
+for (i in 1:length(PIB_pc)) {
+  PIBpc_an[i] <- PIB_pc[i]/head(PIB_pc2, n=(length(PIB_pc2)-12))[i]
+}
+
+PIBpc_an <- ts(PIBpc_an,  start = c(1996, 01, 01), frequency = 12)
+PIBpc_an <- (PIBpc_an-1)*100
+
+##########################
+##### Exchange rate ######
+##########################
+
+# Antigo câmbio nominal
+#cambio_raw <- BETS.get("3696", from = inicio_cambio, to = fim)
+cambio_raw <- BETS.get("11752", from = inicio_cambio, to = fim)
+
+###########################
+##### Interest rates ######
+###########################
+
+selic_4390 <- BETS.get("4390", from = inicio, to = fim)
+# Transforms into anual rate
+selic <- ((1+selic_4390/100)^(12)-1)*100
+
+swap90 <- BETS.get("7818", from = inicio_swap, to = fim)
+``` 
+
+## Visualizing data
+
+```{r, message = FALSE, echo = FALSE, warning = FALSE, eval = FALSE} 
+# Make dummy observations to complete the swap series - I need to plot the graph. Later I'll drop, treat seasonality and merge with selic
+dummy <- ts(rep(0, length(seq(from = as.Date(inicio), to = as.Date(inicio_swap2), by = "1 month"))),  start = c(1996, 01, 01), frequency = 12)
+## Binding the series
+comb <- ts.union(dummy, swap90)
+swap <- pmin(comb[,1], comb[,2], na.rm = TRUE)
+swap[1:44] <- NA
+
+# Plotting some nice graphs
+## First, creates a data frame
+df1 <- data.frame(seq(as.Date(inicio), length = length(ipca), by = "1 month"), capital_trabalho, swap, selic, round(PIBmensal[2:length(PIBmensal)]/10^5,2), cambio_raw[2:length(cambio_raw)], ipca)
+names(df1) <- c("Data", "Capital_trabalho", "swap", "selic", "PIB", "Cambio",  "IPCA")
+df2 <- melt(data = df1, id.vars = "Data")
+
+cores <- brewer.pal(6, "Dark2")
+
+## Individual Graphs
+### Capital-Labor Ratio
+p1ori <- ggplot(df2[which(df2$variable == "Capital_trabalho"),], aes(Data, value, colour = variable)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[1])+
+        scale_y_continuous(name="Capital trabalho\n ") +
+        scale_x_date(date_breaks = "24 months")+ 
+        theme_bw()
+p1ori <- p1ori + theme(axis.text.x=element_blank(), axis.title.x = element_blank(), axis.title.y = element_text(size = 6))
+
+### Swap (interest rate)
+p2ori <- ggplot(df2[which(df2$variable == "swap"),], aes(Data, value, colour = variable)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[5])+
+        scale_y_continuous(name="Swap\n (%a.a)") +
+        scale_x_date(date_breaks = "24 months")+
+        theme_bw()
+p2ori <- p2ori + theme(axis.text.y = element_text(size=6), axis.text.x=element_blank(), axis.title.x = element_blank(), axis.title.y = element_text(size = 6))
+
+### GDP
+p3ori <- ggplot(df2[which(df2$variable == "PIB"),], aes(Data, value, colour = variable)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[3])+
+      scale_y_continuous(name=expression(paste("PIB mensal", x10^{-5}, " \n"))) +
+        scale_x_date(date_breaks = "24 months", name = "Data", labels = date_format("%Y"))+
+        theme_bw()
+p3ori <- p3ori + theme(axis.text.x=element_blank(), axis.title.x = element_blank(), axis.title.y = element_text(size = 6))
+
+## Exchange rate
+p4ori <- ggplot(df2[which(df2$variable == "Cambio"),], aes(Data, value, colour = variable)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[4])+
+        scale_y_continuous(name="Tx. Câmbio (índice)") +
+        scale_x_date(date_breaks = "24 months", name = "Data", labels = date_format("%Y"))+
+        theme_bw()
+p4ori <- p4ori + theme(axis.text.x = element_text(angle=25, hjust = 1, size = 6), axis.title.x = element_blank(), axis.title.y = element_text(size = 6))
+
+## Price Index (IPCA)
+p6ori <- ggplot(df2[which(df2$variable == "IPCA"),], aes(Data, value, colour = variable)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[6])+
+        scale_y_continuous(name="IPCA\n (acum. 12m.)") +
+        scale_x_date(date_breaks = "24 months", name = "Data", labels = date_format("%Y"))+
+        theme_bw()
+p6ori <- p6ori + theme(axis.text.x=element_blank(), axis.title.x = element_blank(), axis.title.y = element_text(size = 6))
+
+grid.arrange(p1ori, p6ori, p3ori, p2ori, p4ori, ncol=1, nrow = 5)
+```
+
+## Treating for seasonality and structural breaks
+
+The output of the seasonality tests will appear. The analysis is hidden inside the code.
+
+### 1. Capital-Labor Ratio
+
+```{r, warning = FALSE, message=FALSE, eval = FALSE, echo = FALSE} 
+
+# Calculates the structural breaks
+bp_ts <- breakpoints(capital_trabalho ~ 1)
+ci_ts <- confint(bp_ts)
+
+# Monthplot aggregates days and months and takes averages
+meses <- ggmonthplot(capital_trabalho) + 
+  theme_bw() +
+  #scale_y_continuous(name = "Capital-Labor Ratio (% - average)") +
+  scale_y_continuous(name = "Razão capital-trabalho (%)") +
+  labs(title = "", x = "Mês", subtitle = "")+
+  theme(axis.title = element_text(size=7), axis.text.x = element_text(angle=25, hjust = 1, size = 7))
+  #labs(title = "Média diária e mensal da razão capital-trabalho", x = "Mês", subtitle = "Nenhuma transformação")
+  #labs(title = "Daily and monthly averages of Capital-Labor ratio", x = "Month", subtitle = "No data transformation")
+
+# Seasonplot has the averages for month, each line represents a year
+season <- ggseasonplot(capital_trabalho, year.labels = TRUE) + 
+  geom_point() + 
+  theme_bw() + 
+  scale_y_continuous(name = "Razão capital-trabalho (%)") +
+  labs(title = "", x = "Mês", subtitle = "")+
+  theme(axis.title = element_text(size=7), axis.text.x = element_text(angle=25, hjust = 1, size = 7))
+  #scale_y_continuous(name = "Capital-Labor Ratio (% - average)") +
+  #labs(title = "Monthly averages of Capital-Labor ratio", x = "Months", subtitle = "No data transformation")
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Season_CT.pdf", width = 6, height = 3)
+season
+#dev.off()
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Month_CT.pdf", width = 6, height = 3)
+meses
+#dev.off()
+
+
+Data <- seq(as.Date("1996-01-01"), length = length(capital_trabalho), by = "1 month")
+df1 <- melt(data.frame(Data,capital_trabalho), id.vars = "Data")
+names(df1) <- c("Data", "Variavel", "Valor")
+
+# Graph with structural break (dashed) and CI (red)
+p1 <- ggplot(df1[which(df1$Variavel == "capital_trabalho"),], aes(Data, Valor, colour = Variavel)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[1])+
+        scale_y_continuous(name = "Razão capital-trabalho (%)") +
+        #scale_y_continuous(name="Capital-Labor ratio") +
+        scale_x_date(date_breaks = "12 months", name = "Data", labels = date_format("%m-%Y"))+ 
+        geom_vline(xintercept = Data[bp_ts$breakpoints], linetype="longdash")+
+        geom_segment(aes(x = Data[ci_ts$confint[1]], y = min(capital_trabalho), xend = Data[ci_ts$confint[3]], yend = min(capital_trabalho)))+
+        theme_bw()
+p1 <- p1 + theme(axis.text.x = element_text(angle=25, hjust = 1, size = 6), legend.position = "none")
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Quebra_CT.pdf", width = 6, height = 3)
+p1
+#dev.off()
+
+# We divide the series in pieces (accordingly to the structural break)
+capital_trabalho_a <- capital_trabalho[1:bp_ts$breakpoints]
+capital_trabalho_b <- capital_trabalho[(bp_ts$breakpoints+1):length(capital_trabalho)]
+capital_trabalho_a <- ts(capital_trabalho_a,  start = c(1996, 01, 01), frequency = 12)
+capital_trabalho_b <- ts(capital_trabalho_b,  start = c(2004, 02, 01), frequency = 12)
+
+m <- seas(x = capital_trabalho_a, transform.function = "none", regression.aictest = NULL)
+#m <- seas(x = capital_trabalho_a, regression.aictest = NULL)
+
+## First diagnostics is using qs() function to check for seasonality after the adjustment
+qs(m)
+# Click here to see the how the qs statistics is calculated: https://stats.stackexchange.com/questions/148573/the-results-and-specifics-from-the-qs-function-in-r
+# The first 7 results are related to the whole series, the last 7 comprehends only the last 8 years
+# qsori is the original series
+# qsorievadj is the original series corrected for extreme values
+# qsrsd is the residual's series of the ARIMA model
+# qssadj is the series with seasonal adjustment 
+# qssadjevadj is the series with seasonal adjustment corrected for extreme values
+# qsirr is the series of the irregular component
+# qsirrevadj is the series of the irregular component corrected for extreme values
+# by the output, we can conclude that there is no evidence of seasonal components in the adjusted series, the residuals and the irregular component, even when we look just the last 8 years.
+
+# Next step is to diagnose the pre-adjust and the ARIMA model
+summary(m)
+# We have an level-shift outlier in July, 1998 (Asian crisis?)
+# We also have additive outliers in Jan96, Jan98, Aug98, Feb99, Mar99, Oct02
+# The estimated model is an ARIMA (1 0 0)(0 1 1) with the non-seasonal AR significative and the MA seasonal significative.
+capital_trabalho_2a <- final(m)
+
+m <- seas(x = capital_trabalho_b, transform.function = "none", regression.aictest = NULL)
+
+#m <- seas(x = capital_trabalho_b, regression.aictest = NULL) # se tomar o log, fica melhor
+qs(m)
+summary(m)
+capital_trabalho_2b <- final(m)
+
+###############
+# Juntando novamente as duas séries
+###############
+
+comb <- ts.union(capital_trabalho_2a, capital_trabalho_2b)
+capital_trabalho_final <- pmin(comb[,1], comb[,2], na.rm = TRUE)
+
+# Compara a série ajustada com a série original
+df <- data.frame(seq(as.Date("1996-01-01"), length = length(capital_trabalho_final), by = "1 month"), capital_trabalho, capital_trabalho_final)
+names(df) <- c("Data", "Original", "Filtrada")
+p1 <- ggplot(df, aes(Data)) +
+  geom_line(aes(y = capital_trabalho, colour = "Original"), linetype = "dashed") +
+  geom_line(aes(y = capital_trabalho_final, colour = "Filtrada")) + 
+  scale_x_date(date_breaks = "12 months", name = "Ano", labels = date_format("%Y"))+
+  scale_y_continuous(name = "Razão Capital/Trabalho (%)")+
+  labs(color="Série") +
+  scale_colour_manual("Variável", breaks = c("Original", "Filtrada"), values = c(cores[1], cores[2]))+
+  theme_bw() + theme(axis.text.x = element_text(angle=30, hjust = 1, size = 7), legend.position = "top")
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-AntesDepois_CT.pdf", width = 6, height = 3)
+p1
+#dev.off()
+
+
+
+# Essa parte ficou de fora
+# Now I'm going to test for unit roots and outliers
+
+teste <- ur.df(capital_trabalho_final, type = "drift", lags = 20, selectlags = "AIC")
+summary(teste)
+# The value of -2.7642 indicates that we fail to reject the hypothesis of a unit root at 5% sig. level
+# Let's take the first difference of this series
+capital_trabalho_diff <- diff(capital_trabalho_final)
+teste <- ur.df(capital_trabalho_diff, type = "drift", lags = 20, selectlags = "AIC")
+
+# The test statistic of -10,74 makes clear that we reject the null hypothesis of unit root
+summary(teste)
+
+# Compara a série ajustada com a série original e a série diferenciada
+df <- data.frame(seq(as.Date("1996-01-01"), length = length(capital_trabalho_final[1:(length(capital_trabalho_final)-1)]), by = "1 month"), capital_trabalho[1:(length(capital_trabalho)-1)], capital_trabalho_final[1:(length(capital_trabalho_final)-1)], capital_trabalho_diff)
+names(df) <- c("Data", "Original", "Série Filtrada", "Série diferenciada")
+p1 <- ggplot(df, aes(Data)) +
+  geom_line(aes(y = capital_trabalho[1:(length(capital_trabalho)-1)], colour = "Original")) +
+  geom_line(aes(y = capital_trabalho_final[1:(length(capital_trabalho_final)-1)], colour = "Filtrada")) + 
+  geom_line(aes(y = capital_trabalho_diff, colour = "Diferenciada")) + 
+  scale_x_date(date_breaks = "12 months", name = "Data", labels = date_format("%m-%Y"))+
+  scale_y_continuous(name = "Razão Capital/Trabalho")+
+  labs(color="Variável") +
+  theme_bw() + theme(axis.text.x = element_text(angle=30, hjust = 1, size = 7))
+p1
+
+rm(capital_trabalho_a, capital_trabalho_b, capital_trabalho_2a, capital_trabalho_2b, p1, capital, trabalho, teste)
+```
+
+### 2. Selic (interest rate)
+
+```{r, message = FALSE, warning = FALSE, eval = FALSE, echo = FALSE} 
+meses <- ggmonthplot(selic) + 
+  theme_bw() +
+  scale_y_continuous(name = "Selic (%a.a.)") +
+  #labs(title = "Média diária e mensal da taxa Selic", x = "Mês", subtitle = "Nenhuma transformação")+
+  labs(title = "", x = "Mês", subtitle = "")+
+  theme(axis.title = element_text(size=7), axis.text.x = element_text(angle=25, hjust = 1, size = 7))
+
+# Gráfico por ano e mês
+season <- ggseasonplot(selic, year.labels = TRUE) + 
+  geom_point() + 
+  theme_bw() + 
+  scale_y_continuous(name = "Selic (%a.a.)") +
+  #labs(title = "Média mensal da taxa Selic", x = "Mês", subtitle = "Nenhuma transformação")+
+  labs(title = "", x = "Mês", subtitle = "")+
+  theme(axis.title = element_text(size=7), axis.text.x = element_text(angle=25, hjust = 1, size = 7))
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Season_SELIC.pdf", width = 6, height = 3)
+season
+#dev.off()
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Month_SELIC.pdf", width = 6, height = 3)
+meses
+#dev.off()
+
+bp_ts <- breakpoints(selic ~ 1)
+ci_ts <- confint(bp_ts)
+
+Data <- seq(as.Date("1996-01-01"), length = length(selic), by = "1 month")
+df1 <- melt(data.frame(Data,selic), id.vars = "Data")
+names(df1) <- c("Data", "Variavel", "Valor")
+
+p1 <- ggplot(df1[which(df1$Variavel == "selic"),], aes(Data, Valor, colour = Variavel)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[1])+
+        scale_y_continuous(name="Selic (%a.a.)") +
+        scale_x_date(date_breaks = "12 months", name = "Data", labels = date_format("%m-%Y"))+ 
+        geom_vline(xintercept = Data[bp_ts$breakpoints], linetype="longdash")+
+        geom_segment(aes(x = Data[ci_ts$confint[1]], y = min(selic), xend = Data[ci_ts$confint[5]], yend = min(selic)))+
+        geom_segment(aes(x = Data[ci_ts$confint[2]], y = min(selic), xend = Data[ci_ts$confint[6]], yend = min(selic)))+
+        theme_bw()
+p1 <- p1 + theme(axis.text.x = element_text(angle=25, hjust = 1, size = 6), legend.position = "none")
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Quebra_SELIC.pdf", width = 6, height = 3)
+p1
+#dev.off()
+
+###########
+# Dividindo a selic em três pedaços
+##########
+
+# Salvando três séries para passar o seasonal
+selic_a <- selic[1:(bp_ts$breakpoints[1]-1)]
+selic_b <- selic[(bp_ts$breakpoints[1]):(bp_ts$breakpoints[2]-1)]
+selic_c <- selic[(bp_ts$breakpoints[2]):(length(selic))]
+selic_a <- ts(selic_a,  start = c(1996, 01, 01), frequency = 12)
+selic_b <- ts(selic_b,  start = c(1999, 05, 01), frequency = 12)
+selic_c <- ts(selic_c,  start = c(2006, 08, 01), frequency = 12)
+
+selic_2a <- selic_a
+
+m <- seas(x = selic_b, transform.function = "none", regression.aictest = NULL)
+qs(m)
+summary(m)
+selic_2b <- final(m)
+
+m <- seas(x = selic_c, transform.function = "none", regression.aictest = NULL) 
+qs(m)
+summary(m)
+selic_2c <- final(m)
+
+###############
+# Juntando novamente as três séries
+###############
+
+comb <- ts.union(selic_2a, selic_2b, selic_2c)
+selic_final <- pmin(comb[,1], comb[,2], comb[,3], na.rm = TRUE)
+
+# Compara a série ajustada com a série original
+df <- data.frame(seq(as.Date("1996-01-01"), length = length(selic_final), by = "1 month"), selic, selic_final)
+names(df) <- c("Data", "Original", "Série Filtrada")
+p1 <- ggplot(df, aes(Data)) +
+  geom_line(aes(y = selic, colour = "Original"), linetype = "dashed") +
+  geom_line(aes(y = selic_final, colour = "Filtrada")) + 
+  scale_x_date(date_breaks = "12 months", name = "Ano", labels = date_format("%Y"))+
+  scale_y_continuous(name = "Selic (%a.a.)")+
+  labs(color="Série") +
+  scale_colour_manual("Variável", breaks = c("Original", "Filtrada"), values = c(cores[1], cores[2]))+
+  theme_bw() + theme(axis.text.x = element_text(angle=30, hjust = 1, size = 7), legend.position = "top")
+p1
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-AntesDepois_SELIC.pdf", width = 6, height = 3)
+p1
+#dev.off()
+
+teste <- ur.df(selic_final, type = "drift", selectlags = "AIC", lags = 20)
+summary(teste)
+# Eu não acho que faz muito sentido diferenciar a selic pra tirar a raiz unitária... mas é uma possibilidade pra ver se são as variações na selic que impactam nas variações da razão capital trabalho
+
+rm(p1, p2, selic_4390, selic_2a, selic_2b, selic_2c, selic_a, selic_b, selic_c, teste)
+```
+
+### 2. Swap DI pré 3 meses (interest rate)
+
+```{r, message = FALSE, warning = FALSE, eval = FALSE, echo = FALSE} 
+meses <- ggmonthplot(swap90) + 
+  theme_bw() +
+  scale_y_continuous(name = "Swap DI 90d (%a.a)") +
+  #labs(title = "Média diária e mensal da taxa Selic", x = "Mês", subtitle = "Nenhuma transformação")+
+  labs(title = "", x = "Mês", subtitle = "")+
+  theme(axis.title = element_text(size=7), axis.text.x = element_text(angle=25, hjust = 1, size = 7))
+
+# Gráfico por ano e mês
+season <- ggseasonplot(swap90, year.labels = TRUE) + 
+  geom_point() + 
+  theme_bw() + 
+  scale_y_continuous(name = "Swap DI 90d (%a.a.)") +
+  #labs(title = "Média mensal da taxa swapDI 90d", x = "Mês", subtitle = "Nenhuma transformação")+
+  labs(title = "", x = "Mês", subtitle = "")+
+  theme(axis.title = element_text(size=7), axis.text.x = element_text(angle=25, hjust = 1, size = 7))
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Season_SWAP.pdf", width = 6, height = 3)
+season
+#dev.off()
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Month_SWAP.pdf", width = 6, height = 3)
+meses
+#dev.off()
+
+bp_ts <- breakpoints(swap90 ~ 1)
+ci_ts <- confint(bp_ts)
+
+#m <- seas(swap90, transform.function = "none", regression.aictest = NULL)
+#summary(m) # Series should not be a candidate for seasonal adjustment because the spectrum of the prior adjusted series (Table B1) has no visually significant seasonal peaks.
+
+Data <- seq(as.Date("1999-09-01"), length = length(swap90), by = "1 month")
+df1 <- melt(data.frame(Data,swap90), id.vars = "Data")
+names(df1) <- c("Data", "Variavel", "Valor")
+
+p1 <- ggplot(df1[which(df1$Variavel == "swap90"),], aes(Data, Valor, colour = Variavel)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[1])+
+        scale_y_continuous(name="Swap DI 90d (%a.a.)") +
+        scale_x_date(date_breaks = "12 months", name = "Data", labels = date_format("%m-%Y"))+ 
+        geom_vline(xintercept = Data[bp_ts$breakpoints], linetype="longdash")+
+        geom_segment(aes(x = Data[ci_ts$confint[1]], y = min(swap90), xend = Data[ci_ts$confint[5]], yend = min(swap90)))+
+        geom_segment(aes(x = Data[ci_ts$confint[2]], y = min(swap90), xend = Data[ci_ts$confint[6]], yend = min(swap90)))+
+        theme_bw()
+p1 <- p1 + theme(axis.text.x = element_text(angle=25, hjust = 1, size = 6), legend.position = "none")
+p1
+
+## Cortar a selic a partir de 1999-09-01
+selic_cortada <- window(selic_final, c(1999, 09))
+
+df8 <- data.frame(Data, swap90, selic_cortada)
+names(df8) <- c("Data", "Swap", "Selic")
+
+df9 <- melt(data = df8, id.vars = "Data")
+
+p9 <- ggplot(df9, aes(Data, value, colour = variable))+
+  geom_line(alpha = 1, aes(linetype = variable))+
+  labs(title="", y = "Taxa (%a.a.)", x = "Ano", color = "Taxa") +
+  scale_colour_brewer(palette = "Set1")+
+  scale_x_date(date_breaks = "1 year", name = "Ano", labels = date_format("%Y"))+
+  theme_bw()
+
+p9 <- p9 + labs(linetype = "Taxa")
+p9 <- p9 + labs(colour = "Taxa")
+p9 <- p9 + theme(legend.position = "top", legend.key.size = unit(.5, "cm"), axis.text.x = element_text(angle = 25, hjust = 1, size = 7), axis.title.y = element_text(size = 7), axis.title.x = element_text(size = 7))
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Swap_Selic.pdf", width = 6, height = 3)
+p9
+#dev.off()
+```
+
+### 3. Monthly per capita GDP
+
+I have to come here later. For now, I got the 12mo variation of the GDP per capita.
+
+### 4. Exchange rate
+
+```{r, message = FALSE, warning = FALSE, eval = FALSE, echo = FALSE} 
+#######################
+# Câmbio              #
+#######################
+cores <- brewer.pal(6, "Dark2")
+
+meses <- ggmonthplot(cambio_raw) + 
+  theme_bw() +
+  scale_y_continuous(name = "Taxa de Câmbio Efetiva Real (índice)") +
+  labs(title = "", x = "Mês", subtitle = "")+
+  theme(axis.title = element_text(size=7), axis.text.x = element_text(angle=25, hjust = 1, size = 7))
+  #labs(title = "Média diária e mensal da taxa de câmbio", x = "Month", subtitle = "No data transformation")
+
+# Gráfico por ano e mês
+season <- ggseasonplot(cambio_raw, year.labels = TRUE) + 
+  geom_point() + 
+  theme_bw() + 
+  scale_y_continuous(name = "Taxa de Câmbio Efetiva Real (índice)") +
+  labs(title = "", x = "Mês", subtitle = "")+
+  theme(axis.title = element_text(size=7), axis.text.x = element_text(angle=25, hjust = 1, size = 7))
+  #labs(title = "Monthly average of exchange rate", x = "Month", subtitle = "No data transformation")
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Season_CAMBIO.pdf", width = 6, height = 3)
+season
+#dev.off()
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Month_CAMBIO.pdf", width = 6, height = 3)
+meses 
+#dev.off() 
+
+bp_ts <- breakpoints(cambio_raw ~ 1)
+ci_ts <- confint(bp_ts)
+
+Data <- seq(as.Date("1996-01-01"), length = length(cambio_raw), by = "1 month")
+df1 <- melt(data.frame(Data,cambio_raw), id.vars = "Data")
+names(df1) <- c("Data", "Variavel", "Valor")
+
+p1 <- ggplot(df1[which(df1$Variavel == "cambio_raw"),], aes(Data, Valor, colour = Variavel)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[1])+
+        scale_y_continuous(name="Taxa de Câmbio Efetiva Real (índice)") +
+        scale_x_date(date_breaks = "12 months", name = "Date", labels = date_format("%m-%Y"))+ 
+        geom_vline(xintercept = Data[bp_ts$breakpoints], linetype="longdash")+
+        geom_segment(aes(x = Data[ci_ts$confint[1]], y = min(cambio_raw), xend = Data[ci_ts$confint[5]], yend = min(cambio_raw)))+
+        geom_segment(aes(x = Data[ci_ts$confint[2]], y = min(cambio_raw), xend = Data[ci_ts$confint[7]], yend = min(cambio_raw)))+
+        geom_segment(aes(x = Data[ci_ts$confint[3]], y = min(cambio_raw), xend = Data[ci_ts$confint[8]], yend = min(cambio_raw)))+
+        geom_segment(aes(x = Data[ci_ts$confint[4]], y = min(cambio_raw), xend = Data[ci_ts$confint[9]], yend = min(cambio_raw)))+
+        geom_segment(aes(x = Data[ci_ts$confint[5]], y = min(cambio_raw), xend = Data[ci_ts$confint[10]], yend = min(cambio_raw)))+
+        theme_bw()
+p1 <- p1 + theme(axis.text.x = element_text(angle=25, hjust = 1, size = 6), legend.position = "none")
+p1
+
+m <- seas(x = cambio_raw, transform.function = "none", regression.aictest = NULL)
+qs(m)
+summary(m)
+cambio_raw.df <- ur.df(cambio_raw, type = "trend", selectlags = "AIC", lags = 20)
+summary(cambio_raw.df) # Não se rejeita a hipótese nula de não estacionariedade
+
+# Agora calculo a diferença da série em log
+cambio <- diff(log(cambio_raw))
+cambio.df <- ur.df(cambio, type = "trend", selectlags = "AIC", lags = 20)
+summary(cambio.df) # Agora sim está estacionária
+
+# Let's try to plot everything together
+df <- data.frame(seq(as.Date("1996-01-01"), length = length(cambio_raw[-length(cambio_raw)]), by = "1 month"), cambio_raw[-length(cambio_raw)]/100, cambio)
+names(df) <- c("Data", "Original", "Série diferenciada")
+p3 <- ggplot(df, aes(Data)) +
+  geom_line(aes(y = cambio_raw[-length(cambio_raw)]/100, colour = "Original")) +
+  geom_line(aes(y = cambio, colour = "Diferenciada")) + 
+  scale_x_date(date_breaks = "12 months", name = "Data", labels = date_format("%Y"))+
+  scale_y_continuous(name = "Taxa de Câmbio Efetiva Real (Índice)")+
+  labs(color="Variável") +
+  theme_bw()
+p3 + theme(axis.text.x = element_text(angle=25, hjust = 1, size = 8))
+```
+
+### 5. IPCA
+
+```{r, message = FALSE, warning = FALSE, eval = FALSE, echo = FALSE} 
+#######################
+# IPCA                #
+#######################
+cores <- brewer.pal(6, "Dark2")
+
+meses <- ggmonthplot(ipca) + 
+  theme_bw() +
+  scale_y_continuous(name = "Taxa de Inflação (IPCA - % a.a.)") +
+  labs(title = "", x = "Mês", subtitle = "")+
+  theme(axis.title = element_text(size=7), axis.text.x = element_text(angle=25, hjust = 1, size = 7))
+  #labs(title = "Monthly average of the inflation index", x = "Month", subtitle = "No data transformation")
+
+# Gráfico por ano e mês
+season <- ggseasonplot(ipca, year.labels = TRUE) + 
+  geom_point() + 
+  theme_bw() + 
+  scale_y_continuous(name = "Taxa de Inflação (IPCA - % a.a.)") +
+  labs(title = "", x = "Mês", subtitle = "")+
+  theme(axis.title = element_text(size=7), axis.text.x = element_text(angle=25, hjust = 1, size = 7))
+  #labs(title = "Monthly average of the inflation index", x = "Month", subtitle = "No data transformation")
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Season_IPCA.pdf", width = 6, height = 3)
+season
+#dev.off()
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Month_IPCA.pdf", width = 6, height = 3)
+meses
+#dev.off()
+
+
+bp_ts <- breakpoints(ipca ~ 1)
+ci_ts <- confint(bp_ts)
+
+Data <- seq(as.Date("1996-01-01"), length = length(ipca), by = "1 month")
+df1 <- melt(data.frame(Data,ipca), id.vars = "Data")
+names(df1) <- c("Data", "Variavel", "Valor")
+
+p1 <- ggplot(df1[which(df1$Variavel == "ipca"),], aes(Data, Valor, colour = Variavel)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[1])+
+        scale_y_continuous(name="Inflation (% monthly)") +
+        scale_x_date(date_breaks = "12 months", name = "Date", labels = date_format("%m-%Y"))+ 
+        geom_vline(xintercept = Data[bp_ts$breakpoints], linetype="longdash")+
+        geom_segment(aes(x = Data[ci_ts$confint[1]], y = min(ipca), xend = Data[ci_ts$confint[5]], yend = min(ipca)))+
+        geom_segment(aes(x = Data[ci_ts$confint[2]], y = min(ipca), xend = Data[ci_ts$confint[6]], yend = min(ipca)))+
+        theme_bw()
+p1 <- p1 + theme(axis.text.x = element_text(angle=25, hjust = 1, size = 6), legend.position = "none")
+p1
+
+# Now I divide the series in 3 different pieces to apply the seasonal filter
+# Salvando três séries para passar o seasonal
+ipca_a <- ipca[1:(bp_ts$breakpoints[1]-1)]
+ipca_b <- ipca[(bp_ts$breakpoints[1]):(bp_ts$breakpoints[2]-1)]
+ipca_c <- ipca[(bp_ts$breakpoints[2]):(length(ipca))]
+ipca_a <- ts(ipca_a,  start = c(1996, 01, 01), frequency = 12)
+ipca_b <- ts(ipca_b,  start = c(2002, 03, 01), frequency = 12)
+ipca_c <- ts(ipca_c,  start = c(2005, 06, 01), frequency = 12)
+
+# There is no evidence of seasonal component in either the complete series nor the pieces
+m <- seas(x = ipca_a, transform.function = "none", regression.aictest = NULL)
+qs(m)
+summary(m)
+# Não tem evidência que precisa ajuste sazonal na primeira parte
+m <- seas(x = ipca_b, transform.function = "none", regression.aictest = NULL)
+qs(m)
+summary(m)
+# Não tem evidência que precisa ajuste sazonal na segunda parte
+m <- seas(x = ipca_c, transform.function = "none", regression.aictest = NULL)
+qs(m)
+summary(m)
+# Não tem evidência que precisa ajuste sazonal na terceira parte
+
+m <- seas(x = ipca, transform.function = "none", regression.aictest = NULL)
+qs(m)
+summary(m)
+# Não tem evidência que precisa ajuste sazonal na série toda
+
+# Como não fiz nenhuma transformação não tem muito o que plotar de gráfico aqui
+```
+
+## Variables after seasonal treatment
+
+```{r, warning = FALSE, message = FALSE, echo = FALSE, eval = FALSE} 
+# Make dummy observations to complete the swap series - I need to plot the graph. Later I'll drop, treat seasonality and merge with selic
+dummy <- ts(rep(0, length(seq(from = as.Date(inicio), to = as.Date(inicio_swap2), by = "1 month"))),  start = c(1996, 01, 01), frequency = 12) 
+## Binding the series 
+comb <- ts.union(dummy, swap90)
+swap <- pmin(comb[,1], comb[,2], na.rm = TRUE)
+swap[1:44] <- NA
+PIB <- PIBpc_an
+
+selic_trim <- ts(selic_final[1:44], start = c(1996, 01, 01), frequency = 12)
+dummy2 <- ts(rep(0, length(seq(from = as.Date("1999-08-01"), to = as.Date("2018-02-01"), by = "1 month"))),  start = c(1999, 08, 01), frequency = 12)
+comb <- ts.union(dummy2, selic_trim)
+selic_2 <- pmin(comb[,1], comb[,2], na.rm = TRUE)
+selic_2[44:266] <- NA
+df3 <- data.frame(seq(as.Date(inicio), length = length(ipca), by = "1 month"), selic_2)
+names(df3) <- c("Data", "Selic")
+df4 <- melt(data = df3, id.vars = "Data")
+
+# Repete o mesmo gráfico de antes, mas com as variáveis dessazonalizadas
+cores <- brewer.pal(6, "Dark2")
+df1 <- data.frame(seq(as.Date(inicio), length = length(ipca), by = "1 month"), capital_trabalho_final, swap, PIB, cambio, ipca)
+names(df1) <- c("Data", "Capital_trabalho", "Swap", "PIB", "Cambio", "IPCA")
+df2 <- melt(data = df1, id.vars = "Data")
+
+# Gráficos individuais
+p1a <- ggplot(df2[which(df2$variable == "Capital_trabalho"),], aes(Data, value, colour = variable)) +
+        geom_line(alpha = 1,  show.legend=F, colour = cores[1], size=1)+
+        scale_y_continuous(name="K/L ratio \n") +
+        scale_x_date(date_breaks = "24 months")+ 
+        theme_bw()
+p1a <- p1a + theme(axis.text.x=element_blank(), axis.title.x = element_blank(), axis.title.y = element_text(size = 7))
+
+p2a <- ggplot(df2[which(df2$variable == "Swap"),], aes(Data, value, colour = variable)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[5], size=1)+
+        geom_line(data = df4, alpha = 1, show.legend = F, colour = cores[2], size = 1)+
+        scale_y_continuous(name="Interest rate\n (% year)") +
+        scale_x_date(date_breaks = "24 months")+ 
+        theme_bw()
+p2a <- p2a + theme(axis.text.x=element_blank(), axis.title.x = element_blank(), axis.title.y = element_text(size = 7))
+
+p3a <- ggplot(df2[which(df2$variable == "PIB"),], aes(Data, value, colour = variable)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[3], size=1)+
+        scale_y_continuous(name="Per capita GDP\n (12 mo. % var.)") +
+        scale_x_date(date_breaks = "24 months")+
+        theme_bw()
+p3a <- p3a + theme(axis.text.x=element_blank(), axis.title.x = element_blank(), axis.title.y = element_text(size = 7))
+
+p4a <- ggplot(df2[which(df2$variable == "Cambio"),], aes(Data, value, colour = variable)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[4], size=1)+
+        scale_y_continuous(name="Ex. rate\n (mo. % var.)") +
+        scale_x_date(date_breaks = "24 months", name = "Ano", labels = date_format("%Y"))+
+        theme_bw()
+p4a <- p4a + theme(axis.text.x = element_text(angle=25, hjust = 1, size = 8), axis.title.x = element_blank(), axis.title.y = element_text(size = 7))
+
+p5a <- ggplot(df2[which(df2$variable == "IPCA"),], aes(Data, value, colour = variable)) +
+        geom_line(alpha = 1, show.legend=F, colour = cores[6], size=1)+
+        scale_y_continuous(name="Inflation\n (cum. 12mo.)") +
+        scale_x_date(date_breaks = "24 months")+
+        theme_bw()
+p5a <- p5a + theme(axis.text.x=element_blank(), axis.title.x = element_blank(), axis.title.y = element_text(size = 7))
+
+grid.arrange(p1a, p2a, p3a, p4a, p5a, ncol=1, nrow = 5)
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\YSI - Buenos Aires\\Imagens\\Fig-Series_semcom_ajuste.pdf", width = 6, height = 6)
+grid.arrange(p1ori, p1a, p6ori, p5a, p3ori, p3a, p2ori, p2a, p4ori, p4a, ncol=2, nrow = 5)
+#dev.off()
+
+grid.arrange(p1a, p5a, p3a, p2a, p4a, ncol=1, nrow = 5)
+``` 
+
+## Descriptives
+
+```{r, results='axis', message=FALSE, warning=FALSE, echo = FALSE, eval = FALSE} 
+### Descriptives
+
+descriptives     <- matrix(NA, nrow = 8, ncol = (ncol(df1)-1))
+rownames(descriptives) <- c("Observações", "Mínimo", "1o quartil",
+                      "Média", "Mediana",  "3o quartil", "Máximo",
+                      "Desv. Pad.")
+
+colnames(descriptives) <- names(df1)[-1]
+
+desc <- function(x) {
+  n       <- length(x)
+  minimum <- min(x, na.rm = TRUE)
+  first_q <- quantile(x, 0.25, na.rm = TRUE)
+  media   <- mean(x, na.rm = TRUE)
+  mediana <- median(x, na.rm = TRUE)
+  third_q <- quantile(x, 0.75, na.rm = TRUE)
+  maximum <- max(x, na.rm = TRUE)
+  std     <- sd(x, na.rm = TRUE)
+
+    return(list(n = n, minimum = minimum, first_quar = first_q, media = media, mediana = mediana, third_quar = third_q, maximum = maximum, std = std))
+}
+
+for (i in 1:8){
+  descriptives[i, 1] <- round(as.numeric(desc(df1[,2])[i]),4)
+  descriptives[i, 2] <- round(as.numeric(desc(df1[,3])[i]),4)
+  descriptives[i, 3] <- round(as.numeric(desc(df1[,4])[i]),4)
+  descriptives[i, 4] <- round(as.numeric(desc(df1[,5])[i]),4)
+  descriptives[i, 5] <- round(as.numeric(desc(df1[,6])[i]),4)
+}
+
+descriptives[1,] <- as.integer(descriptives[1,])
+descriptives <- data.frame(descriptives)
+
+#stargazer(descriptives, summary=FALSE, header = TRUE, type = 'html')
+#stargazer(descriptives, summary=FALSE, header = TRUE, type = 'latex')
+kable(descriptives, "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"))
+
+# ndiffs(x = capital_trabalho_final, test = "adf", alpha = .1)
+# ndiffs(x = ipca, test = "adf", alpha = .1)
+# ndiffs(x = cambio, test = "adf", alpha = .1)
+# ndiffs(x = PIB2, test = "adf", alpha = .1)
+# ndiffs(x = swap90, test = "adf", alpha = .1)
+
+rm(descriptives, df1, bp_ts, ci_ts, comb, df, df2, m, p1a, p2, p2a, p3, p3a, p4, p4a, p5a, p6, ano, ano_ipca, capital_trabalho, dia, final, ipca_acum, cambio_raw, fim, fim_ipca, inicio, inicio_cambio, inicio_deflator, inicio_ipca2, selic, mes, mes_ipca)
+``` 
+
+# Estimating the TVP-VAR
+
+I'll follow the code I have here and first implement the functions separately to call them inside the Gibbs.
+
+## Carter and Kohn algorithm
+
+Implementa Carter and Kohn (1994), On Gibbs sampling for state space models.
+
+Função que implementa o procedimento proposto por Carter and Kohn (1994) para simular estados de uma normal T-variada para ser usado dentro de um algoritmo de Gibbs.
+
+$$y_t=Z_tb_t+\varepsilon_t,  \varepsilon_t\sim N(0,R_t),$$
+$$b_{t+1}=b_t+u_t, u_t\sim N(0,Q).$$
+
+```{r} 
+# carter_kohn_MSV_1(y, Z., Hdraw, iWdraw, s., M., T., B_0_prmean, B_0_prvar)
+carter_kohn_MSV_1 <- function(y, Z., iRt, Q., m., p., T., B0, V0){
+  ############ DEBUG
+    # iRt <- Hdraw
+    # Q.  <- iWdraw
+    # m.  <- s.
+    # p.  <- M.
+    # B0  <- B_0_prmean  
+    # V0  <- B_0_prvar
+   # 
+  ###################
+  
+  # Valores iniciais
+  btt <- B0 # média da a priori de beta em t=1.
+  Vtt <- V0 #variância a priori de beta em t=1.
+  bt  <- matrix(0, nrow = T., ncol = m.) # guarda espaço para salvar as médias da distribuição filtrada.
+  Vt  <- matrix(0, nrow = m.^2, ncol = T.) # guarda as variâncias da distribuição filtrada.
+  
+  # O Filtro de Kalman 
+    # Essa parte do código utiliza o filtro de Kalman para calcular e salvar
+    # algumas quantidades que serão necessárias mais tarde no suavizador de
+    # Kalman. 
+  
+  for (i in 1:T.){
+    bp  <- btt
+    Vp  <- Vtt + Q.
+    #cH  <- chol(iRt[,,i])
+    cH  <- chol(nearest_spd(iRt[,,i]))
+    icH <- solve(cH)
+    R.  <- icH %*% t(icH)
+    H.  <- Z.[((i-1)*p.+1):(i*p.), ]
+    cfe <- y[, i] - H. %*% bp # Erro de previsão um passo à frente
+    VpH <- Vp %*% t(H.)
+    f.  <- H. %*% VpH + R. # Variância do erro de previsão um passo à frente
+    Mt  <- t(solve(t(f.), t(VpH))) # Matlab solves x * A = B and R does A * x = B, therefore you need to transpose everything
+    btt <- bp + Mt %*% cfe
+    Vtt <- Vp - Mt %*% f. %*% t(Mt)
+    bt[i,] <- as.vector(t(btt))
+    Vt[,i] <- as.vector(Vtt)
+  }
+  
+  # Amostre beta de t=T da densidade filtrada beta(T|T) ~ N(bt(:,T),Vt(:,T))
+  
+  bdraw <- matrix(0, nrow = T., ncol = m.)
+  if (!isSymmetric(Vtt) == 1){
+    Vtt <- (Vtt+t(Vtt))/2
+  }
+  
+  #if (!is.positive.definite(as.matrix(Vtt), tol=1e-8)) {
+  #   print(Vtt)
+     Vtt <- nearest_spd(as.matrix(Vtt))
+  #}
+  
+  bdraw[T., ] <- as.vector(mvrnorm(n = 1, mu = btt, Sigma = Vtt)) # Amostra beta de t = T
+  
+  ### Just a test
+  #bdraw[T., ] <- as.vector(c(0.16488,0.8685,0.27914,1.6987,-0.0073799,-0.088275,
+                             #-0.17349,1.6069,0.11384,0.72432,-0.70572,0.72589,
+                             #-0.68657,0.063599,-0.010992,0.13416,-0.75103,-0.043338,
+                             #-0.56875,0.70312,-0.081825))
+  
+  # Amostragem de trás para a frente
+  # Usa as recursões do suavizador para amostrar das a posterioris de todos
+  # os betas para todos os t.
+  
+  for (i in 1:(T.-1)){
+    bf  <- t(bdraw[(T.-i+1),]) # beta amostrado em t+1
+    btt <- t(bt[(T.-i),]) # média da distribuição filtrada em t
+    Vtt <- matrix(Vt[, (T.-i)], nrow = m., ncol = m.) # Variância da distribuição filtrada em t
+    f.   <- Vtt + Q.
+    cfe <- t(bf - btt)
+    VF  <- t(solve(t(f.), t(Vtt)))
+    bmean <- t(btt) + VF %*% cfe # Média à posteriori
+    bvar <- Vtt - VF %*% Vtt  # Variância à posteriori
+    if (!isSymmetric(bvar) == 1){
+      bvar <- (bvar+t(bvar))/2
+    }
+    #if (!is.positive.definite(as.matrix(bvar), tol=1e-8)) {
+    #  print(bvar)
+      bvar <- nearest_spd(as.matrix(bvar))
+    #}
+    
+    bdraw[(T.-i),] <- as.vector(mvrnorm(n = 1, mu = bmean, Sigma = bvar)) # Amostra beta de sua posteriori
+  }
+  
+  #bdraw <- read.table("D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\ToreKleppe\\bdraw2.txt", sep=',')
+  
+  
+  # Amostra b0|T
+  bf  <- t(bdraw[1,]) # beta amostrado em t=1
+  ##bf  <- (bdraw[1,]) # testing
+  btt <- B0           # média da distribuição inicial para b0
+  Vtt <- V0           # variância da distribuição inicial para V0
+  f.  <- Vtt + Q.
+  cfe <- t(bf) - B0
+  VF  <- t(solve(t(f.), t(Vtt)))
+  bmean <- btt + VF %*% cfe   # média a posteriori
+  bvar <- Vtt - VF %*% Vtt    # variância à posteriori
+  if (!isSymmetric(bvar) == 1){
+    bvar <- (bvar+t(bvar))/2
+  }
+  
+  #if (!is.positive.definite(as.matrix(bvar), tol=1e-8)) {
+  #  print(bvar)
+    bvar <- nearest_spd(as.matrix(bvar))
+  #}
+    
+  b0draw <- as.vector(mvrnorm(n = 1, mu = bmean, Sigma = bvar)) # Amostra beta de sua posteriori
+  
+  bdraw <- t(rbind(b0draw, bdraw))
+  
+  return(bdraw)
+}
+
+```
+
+## Windle and Carvalho
+
+Forward Filtering and Backward Sampling in State-Space Models for Symmetric Positive-Definite Matrices
+
+$$r_t\in{R}^{m}, \, t=1\ldots T,$$
+$$r_t\sim N(0,X_t^{-1}), $$
+$$Y_t = r_tr_t^{\prime},$$
+$$Y_t\sim W_m(k,(kX_t)^{-1}),$$
+$$X_t=T_{t-1}^{\prime}\Psi_tT_{t-1}/\lambda,\qquad \Psi_t\sim \beta_m(\frac{n}{2},\frac{k}{2}),$$
+$$T_{t-1}=upper\,\, chol\,\, of\,\, X_{t-1}.$$
+
+See Windle & Carvalho (2014).
+
+```{r}  
+BackSamplWish_chol <- function(r_t,T.,m.,cSig0,lambda,n.,k.){
+  #########################
+  # DEBUG
+  
+      #r_t      <- ut
+      #m.        <- M.
+      #cSig0    <- cSig0_draw
+      #lambda   <- first_am_Hdraw
+      #n.       <- nu_Hdraw
+      #k.       <- 1
+#########################
+  
+  Sig        <- array(NA, dim = c(m., m., T.+1))
+  Sig[, , 1] <- cSig0
+  sqrtlam    <- sqrt(lambda)
+  sqrtk      <- sqrt(k.)
+  Im         <- diag(m.)
+  
+  # Forward filter (proposition 1)
+  
+  for (tezinho in 2:(T.+1)){
+    cCt <- sqrtlam * Sig[,,(tezinho-1)]
+    Sig[ , ,tezinho] <- t(chol_update(t(cCt), r_t[, (tezinho-1)]))
+  }
+  
+  X   <- Sig
+  Cs  <- sqrtk * Sig[, , T.+1]
+  icS <- solve(Cs, Im) 
+  #X[, , T.+1] <-  rWishart(1, k.+n., as.matrix(icS %*% t(icS)))
+  aux <- nearest_spd(as.matrix(icS %*% t(icS)))
+  X[, , T.+1] <-  wishrnd(df= k.+n., sigma. =  aux)
+  
+  #### DEBUG
+  #
+  #X[, , tezinho] <- rbind(c(5.0261, 5.1342,  2.9865), c(5.1342, 28.76, 9.9422), c(2.9865, 9.9422, 4.8392))
+  ###########
+   
+  # Backward Sampling
+  
+  for (tezinho in T.:2) {
+    cS  <- sqrtk * Sig[, , tezinho]
+    icS <- solve(cS, Im)
+    iS  <- icS %*% t(icS)
+    #X[, , tezinho] <- lambda * X[, , tezinho + 1] + rWishart(1, k., iS) ### Parei aqui
+    # wishrnd <- function(sigma., df, d = NA)
+    iS <- nearest_spd(iS)
+    X[, , tezinho] <- lambda * X[, , tezinho + 1] + wishrnd(iS, k.)
+  }
+  
+  X <- X[, , -1] 
+  
+  #return(list(X, Sig)) # Check why we need both X and Sig
+  return(X)
+}
+
+```
+
+Computes the joint density of $\{Y_t\}_{t=1}^T$ as in Proposition 3 of Windle & Carvalho(2014).
+
+$$Y_t = r_t\cdot r_t'.$$
+$$p(\{Y_t\}_{t=1}^T|D_0) = \prod_{t=1}^T p(Y_t|D_{t-1}).$$
+$$P(Y_t|D_{t-1})=\pi^{\frac{mk-k^2}{2}}\frac{\Gamma(0.5\nu)|L_t|^{(k-m-1)*0.5}|C_t|^{0.5n}}{\Gamma(n0.5)\Gamma(0.5k)|C_t+Y_t|^{0.5\nu}}.$$
+$$\nu=n+k;\,C_t=\lambda\Sigma_{t-1};\, \Sigma_t=\lambda\Sigma_{t-1}+Y_t.$$
+
+```{r} 
+MarginalWish_n <- function(ut, T., M., cSig0_n, n., k.) {
+  ########################
+  # DEBUG
+  #
+  # cSig0_n <- cSig0_draw
+  # n. <- nugrid
+  # k. <- 1
+  # 
+  ###########################
+  # Creation of auxiliary constants
+  # Creates the grid on n
+    grid. <- length(n.)
+    lambda = n./(n.+1)
+    
+  # Evaluate constants outside the loop
+    n. <- matrix(rep(n., M.), nrow = M., byrow = T)
+    nu <- n.+k.
+    dimgrid <- (1:M.) %*% matrix(1, ncol = grid.)
+    
+  # Multivariate gamma function
+    # https://www.rdocumentation.org/packages/logOfGamma/versions/0.0.1/topics/gammaln
+    const <- T. * colSums(gammaln(nu*0.5+(1-dimgrid)*0.5)-gammaln(0.5*n.+(1-dimgrid)*0.5)) # repeats in all p(Y_t|D_{t-1}).
+  
+  # Constant values used in the loop
+    sqrtlam <- sqrt(lambda)
+    lndetS0 <- 2*sum(log(diag(cSig0_n)))
+    lnlam   <- log(lambda)
+    
+  # Forward filter
+    ln_pYt <- matrix(NA, nrow = T., ncol = grid.)
+    
+    #foreach(i = 1:grid., .combine=cbind, .packages=c('ramcmc','Rcpp')) %dopar% { # pensar em como combinar os resultados
+    ln_pYt2 <- foreach(i = 1:grid., .packages=c('ramcmc','Rcpp')) %dopar% {
+    #for(i in 1:grid.){
+      lndetSig <- lndetS0 # resets lndetSig to its initial value
+      cSig     <- cSig0_n # resets Sig to its initial value
+      for (tezinho in 1:T.){
+        lndetCt <- M. * lnlam[i] + lndetSig # log determinant of Ct
+        cSig    <- t(chol_update(sqrtlam[i] * t(cSig), t(ut[, tezinho]))) # computes the cholesky decomposition of Sigma_t.
+        lndetSig <- 2 * sum(log(diag(cSig))) # log determinant of Sigma_t.
+        ln_pYt[tezinho,i] <- (n.[1,i]*0.5)*lndetCt - (nu[1,i]*0.5) * lndetSig # computes parts of the likelihood that depend on lambda and n. 
+      }
+      return(as.vector(ln_pYt[,i]))
+    }
+    sum_ln_pYt <- const + mapply(function(x) sum(x, na.rm = T), ln_pYt2)
+    return(sum_ln_pYt)
+}
+```
+
+## Getting everything together
+
+```{r, echo = FALSE, eval = FALSE, echo = FALSE}
+# Junta o swap com a selic
+selic_trim <- ts(selic_final[1:44], start = c(1996, 01, 01), frequency = 12)
+
+# Binding the series
+comb <- ts.union(selic_trim, swap90)
+swap <- pmin(comb[,1], comb[,2], na.rm = TRUE)
+
+var <- cbind(capital_trabalho_final, ipca, PIB, cambio, swap) # The bvar function does not allows data.frames
+names(var) <- c("capital_trabalho", "ipca", "pib", "cambio", "swap")
+
+#saveRDS(var, "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\var.rds") 
+#var <- readRDS("D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\var.rds")
+
+pos_ct     <- grep("capital_trabalho", names(var))
+pos_swap   <- grep("swap", names(var))
+pos_pib    <- grep("pib", names(var))
+pos_cambio <- grep("cambio", names(var))
+pos_ipca   <- grep("ipca", names(var))
+
+
+Y <- var
+```
+
+This block uses the data from Guiilherme just to test the routines
+
+```{r, eval = FALSE}  
+# Readind  data
+Y <- data.frame(read.table("D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\ToreKleppe\\ydata.dat"))
+```
+
+
+```{r}    
+set.seed(4321)
+
+# Dimensions
+T.     <- nrow(Y) # number of periods
+M.     <- ncol(Y) # number of series
+p.     <- 2       # number of lags
+tr.     <- 50-p.   # number of periods used to get the prior hyperparameters
+
+# Preparing the Data
+# Generating the lagged variables
+# I have to check what the bvarsv code does, I really don't remember doing the prior this way...
+ylag <- data.frame(matrix(rep(0, (p.*ncol(Y))*(nrow(Y)-p.)), ncol = p.*ncol(Y), nrow = nrow(Y)-p.))
+
+for (i in 1:p.){
+  ylag[((p.+1):T.), (M.*(i-1)+1):(M.*i)] <- Y[(p.+1-i):(T.-i), 1:M.]
+}
+ylag <- ylag[-c(1:p.),]
+
+s. <- M. + p.*(M.^2)
+# Got the sparce matrix thing from here: http://www.johnmyleswhite.com/notebook/2011/10/31/using-sparse-matrices-in-r/
+Is <- Matrix(0, nrow = s., ncol = s., sparse = TRUE)
+diag(Is) <- 1
+
+# Generates matrix with explanetory variables (the lagged variables) to go with vec(Y)
+Z. <- matrix(0, nrow = (T.-p.)*M., ncol = s.)
+ztemp <- matrix(NA)
+xtemp <- matrix(NA)
+
+
+for (i in 1:(T.-p.)){
+  ztemp <- diag(M.)
+  for (j in 1:p.){
+    xtemp <- ylag[i, ((j-1)*M.+1):(j*M.)]
+    xtemp <- kronecker(diag(M.), as.matrix(xtemp))
+    ztemp <- cbind(ztemp, xtemp)
+  }
+  Z.[((i-1)*M.+1):(i*M.),] <- ztemp
+}
+
+# Getting the stuff for the prior
+Zprior <- Z.[1:(M.*tr.),]
+yprior <- t(Y[(1+p.):(tr.+p.),])
+
+# Data for estimation (i.e. we are removing the first observations used in prior)
+Z. <- Z.[((M.*tr.+1):nrow(Z.)),]
+y  <- t(Y[(tr.+p.+1):(T.),])
+
+# New number of observations: T-p-tr (we lost the obs used in the prior plus the lags)
+T. <- ncol(y) 
+```
+
+### Prior hyperparameters
+
+```{r}  
+# Maybe later I can see if bvarsv code fits well here
+# Bols = (X'X)^(-1)X'Y
+
+Bols <- solve(t(as.matrix(Zprior)) %*% as.matrix(Zprior)) %*% (t(as.matrix(Zprior)) %*% as.vector(yprior))
+residual_ols <- as.vector(yprior) - Zprior %*% Bols
+uprior <- matrix(residual_ols, nrow = M., ncol = tr.)
+hbar <- (uprior %*% t(uprior))/(tr.-M.-1)
+vbar <- matrix(0, ncol = length(Bols), nrow = length(Bols))
+
+for (i in 1:tr.){
+  zhat1 <- Zprior[(((i-1)*M.+1):(i*M.)),]
+  vbar  <- vbar + t(zhat1) %*% solve(hbar, zhat1)
+}
+
+ic_vbar <- solve(chol(vbar),Is)
+Bols_var <- ic_vbar %*% t(ic_vbar)
+
+# Parameters of the prior for B0
+B_0_prmean <- Bols
+B_0_prvar  <- 4 * Bols_var # It's inflated
+
+# Whishart conjugate prior for W obtained from trainning sample following Primiceri
+
+W_prdf <- tr.   # Degrees of freedom
+K_w    <- 0.01
+iW_prscale <- (0.25 * B_0_prvar * W_prdf * (K_w^2)) # look into bvarsv code
+```
+
+Uniform prior for $\nu_H$ using equally spaced grid.
+
+$$H_1\sim W_M(\nu_H,\Sigma_0^-1/\lambda_H).$$
+
+```{r}  
+# Creates the grid
+nugrid <- seq(from = M.-1+0.1, to = 30, length.out = 201)
+
+# Initial value $\Sigma_0$ will be estimated based on a Wishart conjugate prior.
+cSig0 <- sqrt((tr.-1)/(tr.-M.-1)) * chol(cov(t(uprior)))
+nu_H0 <- 4
+Im <- Matrix(0, nrow = M., ncol = M., sparse = TRUE)
+diag(Im) <- 1
+cinvH0  <- solve(cSig0, Im)
+invS0 <- cinvH0 %*% t(cinvH0)
+cSig0_draw <- cSig0
+
+# Set initial values for Bs, W and H
+iWdraw <- 0.0001 * diag(s.)
+Hdraw  <- array(diag(M.), dim = c(nrow(diag(M.)), ncol(diag(M.)), T.))
+# where is Bs?
+```
+
+## Starting the Gibbs Sampler
+
+```{r} 
+nrep     <- 10000 # number of replications
+nburn    <- 5000 # burn in
+Bt_M     <- matrix(0, nrow = s., ncol = T.)
+Bt_S     <- Bt_M
+iH_M     <- array(0, dim = c(M., M., T.))
+iH_S     <- iH_M
+iHdraw   <- iH_M
+Sig0_M   <- iH_M
+Sig0_S   <- Sig0_M
+iW_M     <- matrix(0, nrow = s., ncol = s.)
+iW_S     <- iW_M
+ut_M     <- matrix(0, nrow = M., ncol = T.)
+ut_S     <- matrix(0, nrow = M., ncol = T.)
+ut2_M    <- matrix(0, nrow = M., ncol = T.)
+ut2_S    <- matrix(0, nrow = M., ncol = T.)
+nuH_save <- matrix(NA, nrow = nrep, 1)
+num_Betas  = dim(Bols)[1] 
+
+Bt_save  <- array(0, dim = c(num_Betas, T.+1, nrep))
+Ht_save  <- array(0, dim = c((M.^2+M.)/2, T.+1, nrep))
+
+# For impulse response functions
+nhor <- 25
+imp00 = array(0, dim= c(nrep,M.,nhor))
+imp08 = array(0, dim= c(nrep,M.,nhor))
+imp18 = array(0, dim= c(nrep,M.,nhor))
+bigj = matrix(0, nrow = M., ncol = M.*p.)
+bigj[(1:M.),(1:M.)] <- diag(M.)
+
+```
+
+```{r, eval = FALSE}
+# Parallel stuff
+cl <- makeCluster(8)
+registerDoParallel(cl)
+```
+
+
+```{r}
+#results <- foreach(irep   = 1:(nrep + nburn), .combine = rbind, .packages = c('ramcmc','Rcpp', 'logOfGamma', 'rWishart', 'MASS'), .export= c('carter_kohn_MSV_1', 'MarginalWish_n', 'BackSamplWish_chol', 'wishrnd')) %dopar% {
+ # 1. Sample the Betas using Carter and Kohn
+  # I can insert an if here later to decide between TVP or fixed coefficients VAR
+pm <- proc.time()
+for (irep in 1:(nrep+nburn)){
+  pm2 <- proc.time()
+  Btdraw <- carter_kohn_MSV_1(y, Z., Hdraw, iWdraw, s., M., T., B_0_prmean, B_0_prvar)
+  
+  #Btdraw <- read.table("D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\ToreKleppe\\Btdraw2.txt", sep=',')
+
+  # 2. Sample W from Wishart conditional posterior
+  deltaB <- Btdraw[, 2:ncol(Btdraw)] - Btdraw[, 1:(ncol(Btdraw)-1)]
+  sse_2W <- as.matrix(deltaB) %*% t(as.matrix(deltaB)) # Revisar se precisa as.matrix()
+  icQ    <- solve(chol(sse_2W + iW_prscale), Is)
+  Q      <- icQ %*% t(icQ)
+  #Wdraw_CK <- rWishart(1, T.+W_prdf, as.matrix(Q))
+  Q <- nearest_spd(as.matrix(Q))
+  Wdraw_CK <- wishrnd(as.matrix(Q), T.+W_prdf)
+  
+  #Wdraw_CK <- read.table("D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\ToreKleppe\\Wdraw_CK2.txt", sep=',')
+  
+  #iWdraw   <- solve(matrix(Wdraw_CK, ncol = 21, nrow =21), Is)
+  iWdraw   <- solve(matrix(Wdraw_CK, ncol = ncol(Wdraw_CK), nrow =nrow(Wdraw_CK)), Is)
+
+  ## Sample n_H and J jointly from a colapsed Gibbs
+
+  ut <- matrix(0, nrow = M., ncol = T.)
+  for (i in 1:T.){
+    ut[,i] <- y[,i] - Z.[((i-1)*M.+1):(i*M.),] %*% Btdraw[,(i+1)]
+  }
+
+  ## Compute the marginal likelihood using prop 3 from W&C
+
+  sum_ln_pYt <- MarginalWish_n(ut, T., M., cSig0_draw, nugrid, 1)
+  pys <- exp(sum_ln_pYt-max(sum_ln_pYt))/sum(exp(sum_ln_pYt-max(sum_ln_pYt)))
+  # draw from the multinomial
+  r   <- rmultinom(n=1, size=1, prob = pys)
+
+  ######## DEBUG
+  #r <- matrix((c(rep(0, 40),1,rep(0,160))), ncol = 201)
+  ##############
+
+  # get the index of the grid point drawn.
+  ind <- r==1 # Need to come back here later
+  # defines the n draw.
+  nu_Hdraw <- nugrid[ind] # must check this later
+  # restriction in Appendix 3 of Uhlig (1997).
+  first_am_Hdraw <- nu_Hdraw/(nu_Hdraw+1)
+
+  # Sample H conditional on n using W&C
+  Hdraw <- BackSamplWish_chol(ut, T., M., cSig0_draw, first_am_Hdraw, nu_Hdraw, 1)
+  # # God until here
+  #
+  # # Sample H0 from Wishart posterior based on conjugate prior
+  ciS_bar <- chol(first_am_Hdraw * Hdraw[, ,1]+invS0)
+  cinvS   <- solve(ciS_bar, Im)
+  S_bar   <- cinvS %*% t(cinvS)
+  #cSig0_draw <- chol(matrix(rWishart(1, nu_Hdraw+nu_H0, S_bar), ncol =M., nrow = M.)) # this throw an error sometimes due to a bug in R
+  #if (is.positive.definite(round(as.matrix(S_bar),8), tol=1e-8)) {
+  # cholesky decomposition for the scale matrix
+  #   cSig0_draw <- chol(matrix(wishrnd(df = nu_Hdraw+nu_H0, sigma. = round(as.matrix(S_bar),8)), ncol =M., nrow = M.))
+   #} else {
+  #   if the scale matrix is not positive definite, nearestSPD pick the closest Symmetric Positive Definite matrix to it
+  S_bar  <- nearest_spd(as.matrix(S_bar)) 
+  cSig0_draw <- chol(nearest_spd(matrix(wishrnd(df = nu_Hdraw+nu_H0, sigma. = S_bar), ncol =M., nrow = M.)))
+   #}
+  
+  #Compute moments after burn in
+  if (irep > nburn){
+    nuH_save[irep-nburn] <- nu_Hdraw
+    Bt_save[,,irep-nburn] <- Btdraw
+    for (tezinho in 1:T.){
+      iHdraw[, , tezinho] <- matrix(solve(Hdraw[, , tezinho], Im), nrow = M., ncol = M.)
+      temp <- Hdraw[,,tezinho]
+      Ht_save[,tezinho,irep-nburn] = as.vector(temp[lower.tri(temp, diag=TRUE)])
+    }
+    if (irep == nburn + 1){
+      # I need to check this later
+      deltaB2_M   <- RunningStat(irep-nburn, deltaB^2)[[1]]
+      deltaB2_S   <- RunningStat(irep-nburn, deltaB^2)[[2]]
+      ut_M        <- RunningStat(irep-nburn, ut)[[1]]
+      ut_S        <- RunningStat(irep-nburn, ut)[[2]]
+      ut2_M       <- RunningStat(irep-nburn, ut^2)[[1]]
+      ut2_S       <- RunningStat(irep-nburn, ut^2)[[2]]
+      Bt_M        <- RunningStat(irep-nburn, Btdraw)[[1]]
+      Bt_S        <- RunningStat(irep-nburn, Btdraw)[[2]]
+      iW_M        <- RunningStat(irep-nburn, iWdraw)[[1]]
+      iW_S        <- RunningStat(irep-nburn, iWdraw)[[2]]
+      iH_M        <- RunningStat(irep-nburn, iHdraw)[[1]]
+      iH_S        <- RunningStat(irep-nburn, iHdraw)[[2]]
+      Sig0_M      <- RunningStat(irep-nburn, t(cSig0_draw) %*% cSig0_draw)[[1]]
+      Sig0_S      <- RunningStat(irep-nburn, t(cSig0_draw) %*% cSig0_draw)[[2]]
+    } else {
+      # Same
+      deltaB2_M   <- RunningStat(irep-nburn, deltaB^2, deltaB2_M, deltaB2_S)[[1]]
+      deltaB2_S   <- RunningStat(irep-nburn, deltaB^2, deltaB2_M, deltaB2_S)[[2]]
+      ut_M        <- RunningStat(irep-nburn, ut, ut_M, ut_S)[[1]]
+      ut_S        <- RunningStat(irep-nburn, ut, ut_M, ut_S)[[2]]
+      ut2_M       <- RunningStat(irep-nburn, ut^2, ut2_M, ut2_S)[[1]]
+      ut2_S       <- RunningStat(irep-nburn, ut^2, ut2_M, ut2_S)[[2]]
+      Bt_M        <- RunningStat(irep-nburn, Btdraw, Bt_M, Bt_S)[[1]]
+      Bt_S        <- RunningStat(irep-nburn, Btdraw, Bt_M, Bt_S)[[2]]
+      iW_M        <- RunningStat(irep-nburn, iWdraw, iW_M, iW_S)[[1]]
+      iW_S        <- RunningStat(irep-nburn, iWdraw, iW_M, iW_S)[[2]]
+      iH_M        <- RunningStat(irep-nburn, iHdraw, iH_M, iH_S)[[1]]
+      iH_S        <- RunningStat(irep-nburn, iHdraw, iH_M, iH_S)[[2]]
+      Sig0_M      <- RunningStat(irep-nburn, t(cSig0_draw) %*% cSig0_draw, Sig0_M, Sig0_S)[[1]]
+      Sig0_S      <- RunningStat(irep-nburn, t(cSig0_draw) %*% cSig0_draw, Sig0_M, Sig0_S)[[2]]
+    }
+  }
+  if ((irep %% 50) == 0) {
+   print(c("Iteração: ", irep, "Tempo: ", (proc.time()-pm2)[3]))
+  }
+}
+proc.time() - pm
+stopCluster(cl)
+```
+
+## Graphical analysis
+
+```{r}
+tau. <- tr.
+Data2 <- Data[(tau. + p.):length(Data)]
+
+datemarks <- seq(1, length(Data2), by = 12)
+datemarks2 <- seq(1, length(Data2), by = 24)
+
+mytheme_baixo2 <- theme_bw() + 
+  theme(axis.text.x=element_text(angle=90, hjust = 10, size = 6, vjust = 0),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=6, vjust = -0.5),
+        axis.text.y=element_text(size = 5.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+mytheme_cima <- theme_bw() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),                    
+        axis.ticks.x=element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y=element_text(size = 5.5),
+        plot.title = element_text(size=6, vjust = -0.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+mytheme_baixo <- theme_bw() + 
+  theme(axis.text.x=element_text(angle=25, hjust = 1, size = 6, vjust = 0.3),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=6, vjust = -0.5),
+        axis.text.y=element_text(size = 5.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+number_ticks <- function(n) {function(limits) pretty(limits, n)}
+ 
+nhor <- 25
+```
+
+### TVP coefficients
+
+```{r, warning = FALSE, message = FALSE}
+
+
+Btdraw2 <- t(Btdraw)
+df <- data.frame(Data2, Btdraw2)
+df2 <- melt(data = df, id.vars = "Data2")
+
+graph_betas <- ggplot(df2, aes(Data2, value, colour = variable)) +
+  geom_line(alpha = 1)+
+  labs(title="Beta values", y = "", x= "Time", color = "Coeficient") +
+  #scale_y_continuous(limits = c(-3,4))+
+  scale_x_date(breaks = Data2[datemarks], name = "Data", labels = date_format("%Y"))+
+  theme_bw()+
+  theme(legend.position = "none", axis.text.x=element_text(angle=90, hjust = 10, size = 8, vjust = 0),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=10, vjust = -0.5),
+        axis.text.y=element_text(size = 8),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+```
+
+Only the coefficients in the capital labor ratio equation
+
+
+
+
+### Volatility
+
+```{r}
+#df <- data.frame(datas[1:(length(datas)-1)], drop(iH_M[1,1,]), ut2_M[1,])
+df <- data.frame(Data2[2:length(Data2)], drop(iH_M[1,1,]), ut2_M[1,])
+names(df) <- c("Time", "iH_M", "ut2_M")
+df <- df[1:(nrow(df)-4),]
+
+df2 <- melt(data = df, id.vars = "Time")
+
+p1 <- ggplot(df2, aes(Time, value, colour = variable)) +
+  geom_line(alpha = 1)+
+  labs(title="Volatility", y = "", x= "Tempo") +
+  #scale_y_continuous(limits = c(0,0.1))+
+  #scale_colour_brewer(palette = "Dark2") +
+  theme_bw()
+
+df <- data.frame(Data2[2:length(Data2)], drop(iH_M[2,2,]), ut2_M[2,])
+names(df) <- c("Time", "iH_M", "ut2_M")
+df <- df[1:(nrow(df)-4),]
+
+df2 <- melt(data = df, id.vars = "Time")
+
+p2 <- ggplot(df2, aes(Time, value, colour = variable)) +
+  geom_line(alpha = 1)+
+  labs(title="Volatility", y = "", x= "Tempo") +
+  #scale_y_continuous(limits = c(0,0.1))+
+  #scale_colour_brewer(palette = "Dark2") +
+  theme_bw()
+
+df <- data.frame(Data2[2:length(Data2)], drop(iH_M[3,3,]), ut2_M[3,])
+names(df) <- c("Time", "iH_M", "ut2_M")
+df <- df[1:(nrow(df)-4),]
+
+df2 <- melt(data = df, id.vars = "Time")
+
+p3 <- ggplot(df2, aes(Time, value, colour = variable)) +
+  geom_line(alpha = 1)+
+  labs(title="Volatility", y = "", x= "Tempo") +
+  #scale_y_continuous(limits = c(0,0.1))+
+  #scale_colour_brewer(palette = "Dark2") +
+  theme_bw()
+
+grid.arrange(p1, p2, p3, ncol=1, nrow = 3)
+
+```
+
+## Other coefficients
+
+```{r}
+plot(density((nuH_save)/(nuH_save+1)))
+plot(density(nuH_save))
+
+# Couldn't make it work on ggplot 2, don't know why
+```
+
+# Funções impulso resposta
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE} 
+## Colocando as datas como strings
+tm1 <- as.yearmon(time(var))
+
+# Eixo x
+xax <- time(var)
+# Perde p. obervações pelo lag e outras .tau  pela amostra para estimar por MQO, então começa no tempo 1+p.+tau.
+ini_xax <- 1+p.+tau.
+xax <- xax[ini_xax:tempo]
+
+# Marcas verticais
+d <- ymd(Data[1])
+gp_ini <- d %m+% months(ini_xax)
+gp <- seq(year(gp_ini), year(tail(Data,1)), 1)
+```
+
+
+Peguei a explicação daqui [daqui](https://github.com/FK83/bvarsv/blob/master/bvarsv_Nov2015_website.pdf):
+A FIR estima o impacto de um choque unitário em algum elemento de $\varepsilon_t$. Os elementos de $c_t$, $B_{j,t}$ e $A_t$ em (1) são mantidos fixos em seus valores em $t$, mas os elementos de $\Sigma_t$ são substituídos pela média de todos os períodos. Note que a ordem das variáveis importa e deve ser justificada por argumentos econômicos. As FIR contém os percentis 5, 25, 50, 75 e 95.
+
+```{r}
+# Impulse response (got this from Koop)
+
+# Impulse response analysis. Note that Htsd contains the
+# structural error cov matrix
+# Set up things in VAR(1) format as in Lutkepohl (2005) page 51
+for (betas in 1:(irep-nburn)) {
+  Btdraw_dummy <- Bt_save[,,betas]
+  Hdraw_dummy  <- array(0, dim = c(M., M., tezinho))
+  # Puxadinho do caralho
+  
+  for (hazinho in 1:tezinho){
+  m1 <- matrix(0, M., M.)
+  m1[lower.tri(m1, diag=TRUE)] <- Ht_save[,1,i]
+  m2 <- t(m1)
+  m2[lower.tri(m2, diag=TRUE)] <- Ht_save[,1,i]
+  Hdraw_dummy[,,hazinho] <- m2
+  }
+  
+  biga <- matrix(0, ncol = M.*p., nrow = M.*p.)
+  for (j in 1:(p.-1)){
+    biga[(j*M.+1):(M.*(j+1)),(M.*(j-1)+1):(j*M.)] <- diag(M.)
+  }
+  Htsd <- Hdraw_dummy # I don't want to change all names... This is the Omega matrix from Primiceri
+  for (i in 1:T.){  #Get impulses recursively for each time period
+    bbtemp <- Btdraw_dummy[(M.+1):(s.),i]   #get the draw of B(t) (exclude intercept) and repeat at all times #lazy_girl 
+    splace <- 0
+    for (ii in 1:p.){
+      for (iii in 1:M.){
+        biga[iii,((ii-1)*M.+1):(ii*M.)] <- bbtemp[(splace+1):(splace+M.)]
+        splace <- splace + M.
+      }
+    }
+    
+    #------------Identification code:                
+    #   St dev matrix for structural VAR
+    Hsd <- t(chol(Htsd[,,i]))    #First shock is the Cholesky of the VAR covariance
+    diagonal <- diag(diag(Hsd))
+    Hsd <- solve(diagonal)%*%Hsd     #Unit initial shock
+    
+    #Now get impulse responses for 1 through nhor future periods
+    impresp <- matrix(0, nrow = M., ncol = M.*nhor)
+    impresp[(1:M.),(1:M.)] <- Hsd  #First shock is the Cholesky of the VAR covariance
+    bigai <- biga
+    for (j in 1:(nhor-1)){
+      impresp[,(j*M.+1):((j+1)*M.)] = bigj%*%bigai%*%t(bigj)%*%Hsd
+      bigai = bigai%*%biga
+    }
+    
+    #Only for specified periods - beginning, middle and end of
+    #sample
+    if (Data2[i] == "2000-02-01") {   #Feb 2000
+      impf_m = matrix(0, nrow = M., ncol = nhor)
+      jj=0
+      for (ij in 1:nhor){
+        jj = jj + M.     #restrict to the M-th equation, the interest rate
+        impf_m[,ij] = impresp[,jj]
+      }
+      imp00[betas,,] = impf_m;  #store draws of responses
+    }
+    
+    if (Data2[i] == "2008-06-01") {   #Feb 2000
+      impf_m = matrix(0, nrow = M., ncol = nhor)
+      jj=0
+      for (ij in 1:nhor){
+        jj = jj + M.     #restrict to the M-th equation, the interest rate
+        impf_m[,ij] = impresp[,jj]
+      }
+      imp08[betas,,] = impf_m;  #store draws of responses
+    }
+    
+    if (Data2[i] == "2018-01-01") {   #Feb 2000
+      impf_m = matrix(0, nrow = M., ncol = nhor)
+      jj=0
+      for (ij in 1:nhor){
+        jj = jj + M.     #restrict to the M-th equation, the interest rate
+        impf_m[,ij] = impresp[,jj]
+      }
+      imp18[betas,,] = impf_m;  #store draws of responses
+    }
+  }
+}
+
+
+imp00_swap_ct <- imp00[,1,]
+imp08_swap_ct <- imp08[,1,]
+imp18_swap_ct <- imp18[,1,]
+
+imp00_sct <- t(apply(t(imp00_swap_ct), 1, stat.helper2))
+imp08_sct <- t(apply(t(imp08_swap_ct), 1, stat.helper2))
+imp18_sct <- t(apply(t(imp18_swap_ct), 1, stat.helper2))
+
+teste00 <- vector()
+teste08 <- vector()
+teste18 <- vector()
+for (i in 1:25){
+  teste00[i] <- median(t(imp00_swap_ct)[i,])
+  teste08[i] <- median(t(imp08_swap_ct)[i,])
+  teste18[i] <- median(t(imp18_swap_ct)[i,])
+}
+
+df2 <- data.frame(seq(1, nhor), imp00_sct[,3], imp08_sct[,3], imp18_sct[,3])
+
+
+df2 <- data.frame(seq(1, nhor), teste00, teste08, teste18)
+names(df2) <- c("lag", "ano00", "ano08", "ano17")
+
+
+ira_swap_ct <- ggplot(data = df2, aes(lag,ano08)) +
+  geom_line(aes(y = ano00), colour = 'burlywood2', linetype = "dashed") +
+  geom_line(aes(y = ano17), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = ano08), size = 0.25)+
+  xlab("Months") + ylab("K/L") + ggtitle("Capital-labor ratio ressponse to a monetary shock") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_continuous(breaks=number_ticks(10))+
+  geom_hline(yintercept = 0, size=0.5)+
+  theme_bw() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(hjust = 1, size = 6, vjust = 0),                    
+        axis.ticks.x=element_blank(),
+        axis.title.y = element_text(hjust = 1, size = 6, vjust = 0),
+        axis.text.y=element_text(size = 5.5),
+        plot.title = element_text(size=6, vjust = -0.5),
+        plot.margin = unit(c(1.5,1,1.5,1), "mm"))
+
+```
+
+Coefficients
+
+```{r}
+stat.helper2 <- function(z) c(median(z), quantile(z, c(0.05, 0.25, 0.75, 0.95)))[c(2, 3, 1, 4, 5)]
+
+mytheme_cima <- theme_bw() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),                    
+        axis.ticks.x=element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y=element_text(size = 8),
+        plot.title = element_text(size=9, vjust = -0.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+mytheme_baixo <- theme_bw() + 
+  theme(axis.text.x=element_text(angle=25, hjust = 1, size = 8, vjust = 0.3),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=9, vjust = -0.5),
+        axis.text.y=element_text(size = 5.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+mytheme_baixo2 <- theme_bw() + 
+  theme(axis.text.x=element_text(angle=90, hjust = 10, size = 6, vjust = 0),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=9, vjust = -0.5),
+        axis.text.y=element_text(size = 8),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+# Coef of the first lag interst rate, gpd, ex rate and inflation in their own equations
+
+beta_swap  <-  Bt_save[50,,]
+beta_pib   <-  Bt_save[26,,]
+beta_cambio<-  Bt_save[38,,]
+beta_ipca  <-  Bt_save[14,,]
+
+# Coef of the capital labor ratio equation
+
+# First lag
+beta_int_ct    <-  Bt_save[1,,]
+beta_ct        <-  Bt_save[2,,]
+beta_ipca_ct   <-  Bt_save[3,,]
+beta_pib_ct    <-  Bt_save[4,,]
+beta_cambio_ct <-  Bt_save[5,,]
+beta_swap_ct   <-  Bt_save[6,,]
+
+# second lag
+beta_ct2        <-  Bt_save[7,,]
+beta_ipca_ct2   <-  Bt_save[8,,]
+beta_pib_ct2    <-  Bt_save[9,,]
+beta_cambio_ct2 <-  Bt_save[10,,]
+beta_swap_ct2   <-  Bt_save[11,,]
+
+# Gráficos
+Data <- seq(as.Date("2000-02-01"), length = 217, by = "1 month")
+#Data2 <- Data[(tau. + p.+1):length(Data)]
+
+
+# Gráfico do coeficiente da variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_ct <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + ggtitle("K/L ratio") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_cima
+
+# Gráfico do coeficiente do IPCA variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_ipca_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_ipca_ct <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + ggtitle("Inflation") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_cima
+
+# Gráfico do coeficiente do PIB variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_pib_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_gdp_ct <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + ggtitle("Per Capita GDP") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_cima
+
+# Gráfico do coeficiente do câmbio variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_cambio_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_exrate_ct <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + ggtitle("Exchange rate") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_cima
+
+# Gráfico do coeficiente do Swap variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_swap_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_swap_ct <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + ggtitle("Interest rate") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_cima
+
+###################
+# Second lags
+###################
+
+# Gráfico do coeficiente da variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_ct2, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + #ggtitle("K/L ratio") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+# Gráfico do coeficiente do IPCA variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_ipca_ct2, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_ipca_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + #ggtitle("Inflation") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+# Gráfico do coeficiente do PIB variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_pib_ct2, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_gdp_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + #ggtitle("Per Capita GDP") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+# Gráfico do coeficiente do câmbio variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_cambio_ct2, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_exrate_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + #ggtitle("Exchange rate") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+# Gráfico do coeficiente do Swap variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_swap_ct2, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_swap_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + #ggtitle("Interest rate") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+grid.arrange(graph_beta_ct, graph_beta_ipca_ct, graph_beta_gdp_ct, graph_beta_exrate_ct, graph_beta_swap_ct, graph_beta_ct2, graph_beta_ipca_ct2, graph_beta_gdp_ct2, graph_beta_exrate_ct2, graph_beta_swap_ct2, ncol=5, nrow = 2)
+
+
+# Gráfico de todos coeficientes juntos
+df2 <- data.frame(Data, t(apply(beta_ct, 1, stat.helper2))[,3], t(apply(beta_ipca_ct, 1, stat.helper2))[,3], t(apply(beta_pib_ct, 1, stat.helper2))[,3], t(apply(beta_cambio_ct, 1, stat.helper2))[,3], t(apply(beta_swap_ct, 1, stat.helper2))[,3], t(apply(beta_ct2, 1, stat.helper2))[,3], t(apply(beta_ipca_ct2, 1, stat.helper2))[,3], t(apply(beta_pib_ct2, 1, stat.helper2))[,3], t(apply(beta_cambio_ct2, 1, stat.helper2))[,3], t(apply(beta_swap_ct2, 1, stat.helper2))[,3])
+names(df2) <- c("Date", "KL", "Inflation", "GDP", "Exrate", "Interest", "KL2", "Inflation2", "GDP2", "Exrate2", "Interest2")
+
+mytheme_baixo3 <- theme_bw() + 
+  theme(axis.text.x=element_text(angle=90, hjust = 10, size = 6, vjust = 0),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=9, vjust = -0.5),
+        axis.text.y=element_text(size = 8),
+        plot.margin = unit(c(0,1,1,0), "mm"),
+        legend.position = c(0.8, 0.2))
+
+graph_betas <- ggplot(data = df2, aes(Date,KL)) +
+  geom_line(aes(y = KL), colour = cores[1], linetype = "solid", size = 1) +
+  geom_line(aes(y = Inflation), colour = cores[6], linetype = "solid", size = 1)+
+  geom_line(aes(y = GDP), colour = cores[3], linetype = "solid", size = 1)+
+  geom_line(aes(y = Exrate), colour = cores[4], linetype = "solid", size = 1) +
+  geom_line(aes(y = Interest), colour = cores[5], linetype = "solid", size = 1)+
+  geom_line(aes(y = KL2), colour = cores[1], linetype = "dashed", size = 1) +
+  geom_line(aes(y = Inflation2), colour = cores[6], linetype = "dashed", size = 1)+
+  geom_line(aes(y = GDP2), colour = cores[3], linetype = "dashed", size = 1)+
+  geom_line(aes(y = Exrate2), colour = cores[4], linetype = "dashed", size = 1) +
+  geom_line(aes(y = Interest2), colour = cores[5], linetype = "dashed", size = 1)+
+  xlab("Date") + ylab("Coef") + #ggtitle("Interest rate") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+```
+
+# Dealing with Matlab output data
+
+I've created this part to analyze my output from Matlab directly, since my R code is not yet 100% functional. It's messy for now, sorry.
+
+```{r}
+#install.packages("R.matlab")
+library(R.matlab)
+pacman::p_load(ggplot2, forecast, BETS, bvarsv, lubridate, zoo, stargazer, coda, gridExtra, reshape2, ggfortify, RColorBrewer, scales, quantmod, knitr, grid, ggpubr, gdata, vars, urca, compiler, DescTools, kableExtra, knitr) 
+
+#Beta_1 <- readMat("C:\\Users\\Aishameriane\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\ToreKleppe\\beta_1.mat")
+Beta_1 <- readMat("D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\ToreKleppe\\beta_1.mat")
+
+# Impulso resposta do primeiro, médio e último período sobre a razão capital trabalho
+fir00 <- readMat("D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\ToreKleppe\\Frankfurt\\fir00.mat")
+#print(fir00)
+fir00 <- fir00[[1]]
+
+#fir08 <- readMat("C:\\Users\\Aishameriane\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\ToreKleppe\\fir08.mat")
+fir08 <- readMat("D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\ToreKleppe\\Frankfurt\\fir08.mat")
+#print(fir00)
+fir08 <- fir08[[1]]
+
+#fir17 <- readMat("C:\\Users\\Aishameriane\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\ToreKleppe\\fir17.mat")
+fir17 <- readMat("D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Estudo\\TVP-VAR\\ToreKleppe\\Frankfurt\\fir17.mat")
+fir17 <- fir17[[1]]
+#print(fir00)
+number_ticks <- function(n) {function(limits) pretty(limits, n)}
+nhor = 25
+
+Btdraw_mat <- matrix(0, ncol = 217, nrow = 55)
+for (i in 1:55){
+  for (j in 1:217){
+    Btdraw_mat[i,j] <- median(Beta_1$Bt.save[i,j,])
+  }
+}
+
+Btdraw2 <- t(Btdraw_mat)
+df <- data.frame(Data2, Btdraw2)
+df2 <- melt(data = df, id.vars = "Data2")
+
+graph_betas <- ggplot(df2, aes(Data2, value, colour = variable)) +
+  geom_line(alpha = 1)+
+  labs(title="Beta values", y = "", x= "Time", color = "Coeficient") +
+  #scale_y_continuous(limits = c(-3,4))+
+  scale_x_date(breaks = Data2[datemarks], name = "Data", labels = date_format("%Y"))+
+  theme_bw()+
+  theme(legend.position = "none", axis.text.x=element_text(angle=90, hjust = 10, size = 8, vjust = 0),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=10, vjust = -0.5),
+        axis.text.y=element_text(size = 8),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+# Razão capital trabalho
+df1 <- data.frame(seq(1, nhor), fir17[1,1,], fir17[2,1,], fir17[3,1,], fir17[4,1,], fir17[5,1,])
+names(df1) <- c("lag", "p5", "p25", "media", "p75", "p95")
+
+ira_swap_ct17 <- ggplot(data = df1, aes(lag,media)) +
+  geom_line(aes(y = p5), colour = 'burlywood2', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'burlywood2', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=lag, ymax=p25, ymin=p5), fill="burlywood2", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=p95, ymin=p75), fill="burlywood2", alpha=.3) +
+  xlab("Months") + ylab("K/L") + ggtitle("Capital-labor ratio") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_continuous(breaks=number_ticks(10))+
+  geom_hline(yintercept = 0, size=0.5)+
+  theme_bw() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(hjust = 1, size = 6, vjust = 0),                    
+        axis.ticks.x=element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y=element_text(size = 5.5),
+        plot.title = element_text(size=6, vjust = -0.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+# IPCA
+df1 <- data.frame(seq(1, nhor), fir17[1,2,], fir17[2,2,], fir17[3,2,], fir17[4,2,], fir17[5,2,])
+names(df1) <- c("lag", "p5", "p25", "media", "p75", "p95")
+
+ira_swap_ipca17 <- ggplot(data = df1, aes(lag,media)) +
+  geom_line(aes(y = p5), colour = 'burlywood2', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'burlywood2', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=lag, ymax=p25, ymin=p5), fill="burlywood2", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=p95, ymin=p75), fill="burlywood2", alpha=.3) +
+  xlab("Months") + ylab("IPCA") + ggtitle("Inflation Index") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_continuous(breaks=number_ticks(10))+
+  geom_hline(yintercept = 0, size=0.5)+
+  theme_bw() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(hjust = 1, size = 6, vjust = 0),                    
+        axis.ticks.x=element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y=element_text(size = 5.5),
+        plot.title = element_text(size=6, vjust = -0.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+# PIB
+df1 <- data.frame(seq(1, nhor), fir17[1,3,], fir17[2,3,], fir17[3,3,], fir17[4,3,], fir17[5,3,])
+names(df1) <- c("lag", "p5", "p25", "media", "p75", "p95")
+
+ira_swap_pib17 <- ggplot(data = df1, aes(lag,media)) +
+  geom_line(aes(y = p5), colour = 'burlywood2', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'burlywood2', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=lag, ymax=p25, ymin=p5), fill="burlywood2", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=p95, ymin=p75), fill="burlywood2", alpha=.3) +
+  xlab("Months") + ylab("GDP") + ggtitle("Per Capita GDP") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_continuous(breaks=number_ticks(10))+
+  geom_hline(yintercept = 0, size=0.5)+
+  theme_bw() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(hjust = 1, size = 6, vjust = 0),                    
+        axis.ticks.x=element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y=element_text(size = 5.5),
+        plot.title = element_text(size=6, vjust = -0.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+# Exchange rate
+df1 <- data.frame(seq(1, nhor), fir17[1,4,], fir17[2,4,], fir17[3,4,], fir17[4,4,], fir17[5,4,])
+names(df1) <- c("lag", "p5", "p25", "media", "p75", "p95")
+
+ira_swap_cambio17 <- ggplot(data = df1, aes(lag,media)) +
+  geom_line(aes(y = p5), colour = 'burlywood2', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'burlywood2', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=lag, ymax=p25, ymin=p5), fill="burlywood2", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=lag, ymax=p95, ymin=p75), fill="burlywood2", alpha=.3) +
+  xlab("Months") + ylab("Ex. Rate") + ggtitle("Exchange Rate") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_continuous(breaks=number_ticks(10))+
+  geom_hline(yintercept = 0, size=0.5)+
+  theme_bw() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(hjust = 1, size = 6, vjust = 0),                    
+        axis.ticks.x=element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y=element_text(size = 5.5),
+        plot.title = element_text(size=6, vjust = -0.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Frankfurt\\Fig-FIR-Swap.pdf", width = 6, height = 6)
+grid.arrange(ira_swap_ct17, ira_swap_ipca17, ira_swap_pib17, ira_swap_cambio17, ncol=2, nrow = 2)
+#dev.off()
+
+df2 <- data.frame(seq(1, nhor), fir00[3,1,], fir08[3,1,], fir17[3,1,])
+names(df2) <- c("lag", "Feb2000", "Jul2008", "Jan2018")
+
+ira_swap_ct <- ggplot(data = df2, aes(lag,Jul2008)) +
+  geom_line(aes(y = Feb2000), colour = 'burlywood2', linetype = "dashed") +
+  geom_line(aes(y = Jan2018), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = Jul2008), size = 0.25)+
+  xlab("Months") + ylab("K/L") + ggtitle("Capital-labor ratio response to a monetary shock") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_continuous(breaks=number_ticks(10))+
+  geom_hline(yintercept = 0, size=0.5)+
+  theme_bw() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_text(hjust = 1, size = 8, vjust = 0),                    
+        axis.ticks.x=element_blank(),
+        axis.title.y = element_text(hjust = 1, size = 8, vjust = 0),
+        axis.text.y=element_text(size = 8),
+        plot.title = element_text(size=10, vjust = -0.5),
+        plot.margin = unit(c(1.5,1,1.5,1), "mm"))
+
+#pdf(file = "D:\\Onedrive - Aisha\\OneDrive\\Documentos\\Mestrado Economia\\Dissertação\\Frankfurt\\Fig-FIR-Swap_CT.pdf", width = 6, height = 6)
+ira_swap_ct
+#dev.off()
+
+
+## Calculating for the Betas
+# Funções auxiliares
+stat.helper2 <- function(z) c(mean(z), quantile(z, c(0.05, 0.25, 0.75, 0.95)))[c(2, 3, 1, 4, 5)]
+
+mytheme_cima <- theme_bw() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),                    
+        axis.ticks.x=element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y=element_text(size = 5.5),
+        plot.title = element_text(size=6, vjust = -0.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+mytheme_baixo <- theme_bw() + 
+  theme(axis.text.x=element_text(angle=25, hjust = 1, size = 6, vjust = 0.3),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=6, vjust = -0.5),
+        axis.text.y=element_text(size = 5.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+mytheme_baixo2 <- theme_bw() + 
+  theme(axis.text.x=element_text(angle=90, hjust = 10, size = 6, vjust = 0),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=6, vjust = -0.5),
+        axis.text.y=element_text(size = 5.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+
+beta_swap  <-  Beta_1$Bt.save[50,,]
+beta_pib   <-  Beta_1$Bt.save[26,,]
+beta_cambio<-  Beta_1$Bt.save[38,,]
+beta_ipca  <-  Beta_1$Bt.save[14,,]
+
+beta_ct    <-  Beta_1$Bt.save[2,,]
+beta_swap_ct   <-  Beta_1$Bt.save[6,,]
+beta_pib_ct    <-  Beta_1$Bt.save[4,,]
+beta_cambio_ct <-  Beta_1$Bt.save[5,,]
+beta_ipca_ct   <-  Beta_1$Bt.save[3,,]
+
+mcmc_beta_ct       <- mcmc(Beta_1$Bt.save[2,,], start = 1, end = dim(Beta_1$Bt.save[2,,])[1])
+mcmc_beta_swap     <- mcmc(Beta_1$Bt.save[50,,], start = 1, end = dim(Beta_1$Bt.save[50,,])[1])
+mcmc_beta_pib      <- mcmc(Beta_1$Bt.save[26,,], start = 1, end = dim(Beta_1$Bt.save[26,,])[1])
+mcmc_beta_cambio   <- mcmc(Beta_1$Bt.save[38,,], start = 1, end = dim(Beta_1$Bt.save[38,,])[1])
+mcmc_beta_ipca     <- mcmc(Beta_1$Bt.save[14,,], start = 1, end = dim(Beta_1$Bt.save[14,,])[1])
+
+# Gráficos
+Data <- seq(as.Date("2000-01-01"), length = 217, by = "1 month")
+#Data2 <- Data[(tau. + p.+1):length(Data)]
+
+datemarks <- seq(1, length(Data), by = 12)
+
+# Gráfico do coeficiente da variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'skyblue3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'skyblue4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'skyblue4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'skyblue3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="skyblue3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="skyblue4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="skyblue4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="skyblue3", alpha=.3) +
+  xlab("Data") + ylab("Coeficiente") + ggtitle("K/L lagged coefficient in its own equation") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+###################################
+# Swap na razão capital trabalho
+###################################
+
+x1betaswapct2 <- t(apply(beta_swap_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betaswapct2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'skyblue3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'skyblue4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'skyblue4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'skyblue3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="skyblue3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="skyblue4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="skyblue4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="skyblue3", alpha=.3) +
+  xlab("Data") + ylab("Coeficiente") + ggtitle("Interest rate lagged coefficient in the K/L equation") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+
+
+####################################################################################
+stat.helper2 <- function(z) c(median(z), quantile(z, c(0.05, 0.25, 0.75, 0.95)))[c(2, 3, 1, 4, 5)]
+
+mytheme_cima <- theme_bw() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),                    
+        axis.ticks.x=element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y=element_text(size = 8),
+        plot.title = element_text(size=9, vjust = -0.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+mytheme_baixo <- theme_bw() + 
+  theme(axis.text.x=element_text(angle=25, hjust = 1, size = 8, vjust = 0.3),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=9, vjust = -0.5),
+        axis.text.y=element_text(size = 5.5),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+mytheme_baixo2 <- theme_bw() + 
+  theme(axis.text.x=element_text(angle=90, hjust = 10, size = 6, vjust = 0),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=9, vjust = -0.5),
+        axis.text.y=element_text(size = 8),
+        plot.margin = unit(c(0,1,1,0), "mm"))
+
+# Coef of the first lag interst rate, gpd, ex rate and inflation in their own equations
+
+beta_swap  <-  Beta_1$Bt.save[50,,]
+beta_pib   <-  Beta_1$Bt.save[26,,]
+beta_cambio<-  Beta_1$Bt.save[38,,]
+beta_ipca  <-  Beta_1$Bt.save[14,,]
+
+# Coef of the capital labor ratio equation
+
+# First lag
+beta_int_ct    <-  Beta_1$Bt.save[1,,]
+beta_ct        <-  Beta_1$Bt.save[2,,]
+beta_ipca_ct   <-  Beta_1$Bt.save[3,,]
+beta_pib_ct    <-  Beta_1$Bt.save[4,,]
+beta_cambio_ct <-  Beta_1$Bt.save[5,,]
+beta_swap_ct   <-  Beta_1$Bt.save[6,,]
+
+# second lag
+beta_ct2        <-  Beta_1$Bt.save[7,,]
+beta_ipca_ct2   <-  Beta_1$Bt.save[8,,]
+beta_pib_ct2    <-  Beta_1$Bt.save[9,,]
+beta_cambio_ct2 <-  Beta_1$Bt.save[10,,]
+beta_swap_ct2   <-  Beta_1$Bt.save[11,,]
+
+# Gráficos
+Data <- seq(as.Date("2000-02-01"), length = 217, by = "1 month")
+#Data2 <- Data[(tau. + p.+1):length(Data)]
+
+
+# Gráfico do coeficiente da variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_ct <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + ggtitle("K/L ratio") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_cima
+
+# Gráfico do coeficiente do IPCA variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_ipca_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_ipca_ct <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + ggtitle("Inflation") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_cima
+
+# Gráfico do coeficiente do PIB variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_pib_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_gdp_ct <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + ggtitle("Per Capita GDP") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_cima
+
+# Gráfico do coeficiente do câmbio variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_cambio_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_exrate_ct <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + ggtitle("Exchange rate") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_cima
+
+# Gráfico do coeficiente do Swap variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_swap_ct, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_swap_ct <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + ggtitle("Interest rate") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_cima
+
+###################
+# Second lags
+###################
+
+# Gráfico do coeficiente da variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_ct2, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + #ggtitle("K/L ratio") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+# Gráfico do coeficiente do IPCA variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_ipca_ct2, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_ipca_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + #ggtitle("Inflation") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+# Gráfico do coeficiente do PIB variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_pib_ct2, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_gdp_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + #ggtitle("Per Capita GDP") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+# Gráfico do coeficiente do câmbio variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_cambio_ct2, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_exrate_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + #ggtitle("Exchange rate") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+# Gráfico do coeficiente do Swap variável defasada na razão capital-trabalho
+x1betact2 <- t(apply(beta_swap_ct2, 1, stat.helper2))
+
+df2 <- data.frame(Data, x1betact2)
+names(df2) <- c("Data", "p5", "p25", "media", "p75", "p95")
+
+graph_beta_swap_ct2 <- ggplot(data = df2, aes(Data,media)) +
+  geom_line(aes(y = p5), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = p25), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p75), colour = 'burlywood4', linetype = "longdash")+
+  geom_line(aes(y = p95), colour = 'rosybrown3', linetype = "dashed") +
+  geom_line(aes(y = media), size = 0.25)+
+  geom_ribbon(aes(x=Data, ymax=p25, ymin=p5), fill="rosybrown3", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=media, ymin=p25), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p75, ymin=media), fill="burlywood4", alpha=.3) +
+  geom_ribbon(aes(x=Data, ymax=p95, ymin=p75), fill="rosybrown3", alpha=.3) +
+  xlab("Date") + ylab("Coef") + #ggtitle("Interest rate") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+
+grid.arrange(graph_beta_ct, graph_beta_ipca_ct, graph_beta_gdp_ct, graph_beta_exrate_ct, graph_beta_swap_ct, graph_beta_ct2, graph_beta_ipca_ct2, graph_beta_gdp_ct2, graph_beta_exrate_ct2, graph_beta_swap_ct2, ncol=5, nrow = 2)
+
+
+# Gráfico de todos coeficientes juntos
+df2 <- data.frame(Data, t(apply(beta_ct, 1, stat.helper2))[,3], t(apply(beta_ipca_ct, 1, stat.helper2))[,3], t(apply(beta_pib_ct, 1, stat.helper2))[,3], t(apply(beta_cambio_ct, 1, stat.helper2))[,3], t(apply(beta_swap_ct, 1, stat.helper2))[,3], t(apply(beta_ct2, 1, stat.helper2))[,3], t(apply(beta_ipca_ct2, 1, stat.helper2))[,3], t(apply(beta_pib_ct2, 1, stat.helper2))[,3], t(apply(beta_cambio_ct2, 1, stat.helper2))[,3], t(apply(beta_swap_ct2, 1, stat.helper2))[,3])
+names(df2) <- c("Date", "KL", "Inflation", "GDP", "Exrate", "Interest", "KL2", "Inflation2", "GDP2", "Exrate2", "Interest2")
+
+mytheme_baixo3 <- theme_bw() + 
+  theme(axis.text.x=element_text(angle=90, hjust = 10, size = 6, vjust = 0),
+        axis.title.y = element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size=9, vjust = -0.5),
+        axis.text.y=element_text(size = 8),
+        plot.margin = unit(c(0,1,1,0), "mm"),
+        legend.position = c(0.8, 0.2))
+
+graph_betas <- ggplot(data = df2, aes(Date,KL)) +
+  geom_line(aes(y = KL), colour = cores[1], linetype = "solid", size = 1) +
+  geom_line(aes(y = Inflation), colour = cores[6], linetype = "solid", size = 1)+
+  geom_line(aes(y = GDP), colour = cores[3], linetype = "solid", size = 1)+
+  geom_line(aes(y = Exrate), colour = cores[4], linetype = "solid", size = 1) +
+  geom_line(aes(y = Interest), colour = cores[5], linetype = "solid", size = 1)+
+  geom_line(aes(y = KL2), colour = cores[1], linetype = "dashed", size = 1) +
+  geom_line(aes(y = Inflation2), colour = cores[6], linetype = "dashed", size = 1)+
+  geom_line(aes(y = GDP2), colour = cores[3], linetype = "dashed", size = 1)+
+  geom_line(aes(y = Exrate2), colour = cores[4], linetype = "dashed", size = 1) +
+  geom_line(aes(y = Interest2), colour = cores[5], linetype = "dashed", size = 1)+
+  xlab("Date") + ylab("Coef") + #ggtitle("Interest rate") +
+  scale_y_continuous(breaks = number_ticks(10)) +
+  scale_x_date(breaks = Data[datemarks2], name = "Data", labels = date_format("%Y"))+
+  #geom_hline(yintercept = 0, size=0.5)+
+  mytheme_baixo2
+```
