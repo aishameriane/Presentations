@@ -5,6 +5,7 @@ Repository for presentations in conferences and events (I'm still updating it, s
 
 ## 2018
 
+* [Indicadores Sociais](https://github.com/aishameriane/Presentations/tree/master/Indicadores-Sociais) (_November, Florianópolis_) - This was a participation in prof. Fachinello class (UFSC) to talk about social indexes. In Portuguese.
 * [ESOBE]() (_October, New Orleans_) - This was a [poster]() presentation at the European Seminar on Bayesian Econometrics, held at the FED in New Orleans, Lousiana. In English.
 * [SAECO](https://github.com/aishameriane/Presentations/tree/master/SAECO2018) (_October, Florianópolis-SC_)- This was an invited short course I gave (more like a 2h talk) about bayesian econometrics, presented at the economics undergraduate week at UFSC. The material is in Portuguese.
 * [Sinape]() (_September, São Pedro-SP_) - The [slides]() of my oral presentation (using preliminary results from my master thesis) at the 23th Brazilian Symposium on Probability and Statistics (**Sinape**). There is also a [poster]() that I presented there as well, related to my undergraduate thesis. In Portuguese.
