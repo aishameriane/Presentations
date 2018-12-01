@@ -5,7 +5,7 @@ Repository for presentations in conferences, events and others, starting in 2017
 
 ## 2018
 
-* [What could go wrong with ML?](https://github.com/aishameriane/Presentations/blob/master/Econometria%20UDESC/EMV%20e%20Bayesiana%20-%20Aisha.pdf) (_November, Florianópolis_) - This was a participation in Prof. Pozzobon econometrics course (UDESC) to talk some extra topics of maximum likelihood estimation and introduction to bayesian methods. In Portuguese.
+* [What could go wrong with ML?](https://github.com/aishameriane/Presentations/blob/master/Econometria%20UDESC/EMV%20e%20Bayesiana%20-%20Slides%20Aisha.pdf) (_November, Florianópolis_) - This was a participation in Prof. Pozzobon econometrics course (UDESC) to talk some extra topics of maximum likelihood estimation and introduction to bayesian methods. In Portuguese.
 
 * [VAR models](https://github.com/aishameriane/Presentations/blob/master/Econometria%20UDESC/Modelos%20VAR%20-%20Aisha.pdf) (_November, Florianópolis_) - This was a participation in Prof. Pozzobon time series course (UDESC) to talk some aditional topics on VAR models. In Portuguese.
 
