@@ -1,5 +1,5 @@
 # Presentations, talks, etc
-Repository for presentations in conferences, events and others, starting in 2017.
+Repository for presentations in conferences, events and others, starting in 2017. I'm discontinuing this and moving the list to my website.
 
 <img src="http://phdcomics.com/comics/archive/phd012113s.gif" width="500" align = "right">
 
