@@ -1,6 +1,6 @@
 # R-Ladies Floripa    
 
-Materiais do mini curso de introdução à programação usando o R e R Studio. Maio de 2019.
+Materiais do mini curso de [introdução à programação usando o R e R Studio](https://www.meetup.com/pt-BR/rladies-florianopolis/events/261303339/) para o [R-Ladies Floripa](https://www.meetup.com/pt-BR/rladies-florianopolis/). Maio de 2019.
 
 Descrição dos arquivos:
 
