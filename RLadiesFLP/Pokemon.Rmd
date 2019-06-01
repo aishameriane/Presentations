@@ -1,0 +1,94 @@
+---
+title: "Análise Pokémon"
+author: "A. Schmidt"
+date: "June 1, 2019"
+output: html_document
+---
+
+# Introdução
+Este documento tem as análises do banco de dados [Pokémon](https://github.com/ayoubimaya/pokemon).
+
+## Leitura dos dados
+
+Vamos buscar os dados de duas fontes: [Fonte 1](https://tinyurl.com/pokemon-rladies-01 ) e [Fonte 2](https://tinyurl.com/pokemon-rladies-02).
+
+```{r}
+Pokemon_01 <- read.csv('https://tinyurl.com/pokemon-rladies-01')
+Pokemon_02 <- read.csv('https://tinyurl.com/pokemon-rladies-02')
+
+head(Pokemon_01, n=10)
+head(Pokemon_02, n = 3)
+
+class(Pokemon_01)
+class(Pokemon_02)
+
+summary(Pokemon_01)
+summary(Pokemon_02)
+```
+
+## Juntando os data frames
+
+Vamos utilizar a função `merge()`.
+
+```{r}
+Pokemon <- merge(Pokemon_01, Pokemon_02, by = "ID")
+head(Pokemon[, -7])
+Pokemon <- Pokemon[, -7]
+head(Pokemon)
+names(Pokemon)[2] <- "Nome"
+head(Pokemon)
+```
+
+## Fazendo tabelas
+
+Muitas vezes queremos olhar nossos dados em tabelas, para fazer cruzamentos dos nossos dados. Existem muitos pacotes para fazer tabelas "bonitas", como o Kaggle e Stargazer (que é compatível com Latex). Alguns recursos disponíveis são:
+
+* https://www.r-statistics.com/2013/07/tailor-your-tables-with-stargazer-new-features-for-latex-and-text-output/
+* https://rmarkdown.rstudio.com/lesson-7.html
+* https://cran.r-project.org/web/packages/kableExtra/vignettes/awesome_table_in_html.html
+* https://bookdown.org/yihui/rmarkdown/tufte-tables.html
+
+Também podemos usar nosso bom e velho pacote base para começar a manipular os dados.
+
+```{r}
+table(Pokemon$Tipo1, Pokemon$Lendario)
+```
+
+Podemos também criar tabelas de frequências, da sequinte forma:
+
+```{r}
+Tabela <- table(Pokemon$Tipo1, Pokemon$Lendario)
+round(prop.table(Tabela, 2),2)
+```
+
+## Gráficos
+
+O pacote base do R tem a função `plot()` que faz um gráfico simples. Também temos a função `hist()` para histogramas e `box.plot()` para boxplots. Para além disso, o pacote `ggplot2` abre muitas possibilidades de gráficos. Gráficos interativos podem ser feitos em shiny ou plotly.
+
+```{r}
+plot(Pokemon$Ataque, type = 'p', ylab = "Ataque", xlab = "ID")
+plot(Pokemon$Ataque[which(Pokemon$Lendario == T)], type = 'p', ylab = "Ataque", xlab = "ID")
+```
+
+O gráfico anterior não é muito informativo para nós. Vamos fazer um box plot que tenha no eixo x o valor do ataque e no eixo y a categoria (se é lendário ou não). 
+
+```{r}
+table(Pokemon$Lendario)
+Pokemon$Lendario[Pokemon$Lendario == TRUE] <- "Lendario"
+Pokemon$Lendario[Pokemon$Lendario == FALSE] <- "Normal"
+
+boxplot(Pokemon$Ataque ~ Pokemon$Lendario, ylab = "Ataque", xlab = "Tipo")
+```
+
+E se quiséssemos usar `ggplot2`?
+
+```{r, message = FALSE}
+# Descomente a linha abaixo caso você não tenha o ggplot2 instalado
+# install.packages("ggplot2")
+
+library(ggplot2)
+
+p <- ggplot(Pokemon, aes(x=Lendario, y=Ataque)) + 
+  geom_boxplot()
+p
+```
