@@ -4,6 +4,10 @@ Obs: I'm discontinuing this and moving the list to [my website](https://sites.go
 
 <img src="http://phdcomics.com/comics/archive/phd012113s.gif" width="500" align = "right">
 
+## 2020
+
+* Intro day BDS/TI: [Link](https://docs.google.com/presentation/d/1Qy5ROzKUkMkvTYRXDDRmJUyD1ZIigZw_ugI56fAX954/edit?usp=sharing)
+
 ## 2018
 
 * [What could go wrong with ML?](https://github.com/aishameriane/Presentations/blob/master/Econometria%20UDESC/EMV%20e%20Bayesiana%20-%20Slides%20Aisha.pdf) (_November, Florianópolis_) - This was a participation in Prof. Pozzobon econometrics course (UDESC) to talk some extra topics of maximum likelihood estimation and introduction to bayesian methods. In Portuguese.
