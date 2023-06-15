@@ -1,0 +1,1 @@
+Material related to presentations from the work _Inflation nowcasting in persistently high inflation environments_, with Richard Schnnorrenberger (University of Kiel) and Guilherme Valle Moura (Federal University of Santa Catarina).
